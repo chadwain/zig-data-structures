@@ -5,11 +5,33 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const assert = std.debug.assert;
 const expect = std.testing.expect;
 
+fn searchForInsertPosition(
+    comptime T: type,
+    key: T,
+    items: []const T,
+) usize {
+    var left: usize = 0;
+    var right: usize = items.len;
+
+    while (left < right) {
+        // Avoid overflowing in the midpoint calculation
+        const mid = left + (right - left) / 2;
+        // Compare the key with the midpoint element
+        switch (key < items[mid]) {
+            false => left = mid + 1,
+            true => right = mid,
+        }
+    }
+
+    return left;
+}
+
 pub fn PrefixTree(comptime T: type) type {
     return struct {
         const Self = @This();
 
         const Node = struct {
+            // https://github.com/ziglang/zig/issues/4562
             const S = struct { s: ?*Node };
 
             labels: ArrayListUnmanaged(T) = ArrayListUnmanaged(T){},
@@ -30,6 +52,14 @@ pub fn PrefixTree(comptime T: type) type {
                 self.labels.deinit(allocator);
                 self.pointers.deinit(allocator);
             }
+            fn indexOf(self: Node, label: T) ?usize {
+                const cmpFn = struct {
+                    fn f(ctx: void, lhs: T, rhs: T) std.math.Order {
+                        return std.math.order(lhs, rhs);
+                    }
+                }.f;
+                return std.sort.binarySearch(T, label, self.labels.items, {}, cmpFn);
+            }
         };
 
         root: Node = Node{},
@@ -41,30 +71,24 @@ pub fn PrefixTree(comptime T: type) type {
             };
         }
 
-        fn findEdge(node: *const Node, label: T) ?usize {
-            return for (node.labels.items) |l, i| {
-                if (label == l) break i;
-            } else null;
-        }
-
         pub fn exists(self: Self, item: []const T) bool {
             if (item.len == 0) return true;
 
             var current = &self.root;
             for (item[0 .. item.len - 1]) |i| {
-                const edge_index = findEdge(current, i) orelse return false;
+                const edge_index = current.indexOf(i) orelse return false;
                 current = current.pointers.items[edge_index].s orelse return false;
             }
-            return if (findEdge(current, item[item.len - 1])) |_| true else false;
+            return if (current.indexOf(item[item.len - 1])) |_| true else false;
         }
 
         fn newLabel(node: *Node, label: T, allocator: *Allocator) !usize {
-            const old_len = node.labels.items.len;
-            try node.labels.append(allocator, label);
-            errdefer node.labels.shrink(allocator, old_len);
-            try node.pointers.append(allocator, .{ .s = null });
-            errdefer node.pointers.shrink(allocator, old_len);
-            return old_len;
+            const index = searchForInsertPosition(T, label, node.labels.items);
+            try node.labels.insert(allocator, index, label);
+            errdefer _ = node.labels.orderedRemove(index);
+            try node.pointers.insert(allocator, index, .{ .s = null });
+            errdefer _ = node.pointers.orderedRemove(index);
+            return index;
         }
 
         fn deleteEdge(node: *Node, edge_index: usize, allocator: *Allocator) void {
@@ -115,7 +139,7 @@ pub fn PrefixTree(comptime T: type) type {
             if (item.len == 0) return;
 
             const label = item[0];
-            if (findEdge(node, label)) |edge_index| {
+            if (node.indexOf(label)) |edge_index| {
                 if (node.pointers.items[edge_index].s) |p| {
                     try findOrInsertEdge(p, item[1..], allocator);
                 } else {
