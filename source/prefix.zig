@@ -27,8 +27,8 @@ fn searchForInsertPosition(
     return left;
 }
 
-pub fn PrefixTree(comptime T: type) type {
-    const Node = struct {
+fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math.Order) type {
+    return struct {
         const Self = @This();
         // https://github.com/ziglang/zig/issues/4562
         const S = struct { s: ?*Self };
@@ -37,13 +37,13 @@ pub fn PrefixTree(comptime T: type) type {
         child_nodes: ArrayListUnmanaged(S) = ArrayListUnmanaged(S){},
 
         fn initCapacity(allocator: *Allocator, n: usize) !Self {
-            var l = try ArrayListUnmanaged(T).initCapacity(allocator, n);
-            errdefer l.deinit(allocator);
-            var p = try ArrayListUnmanaged(S).initCapacity(allocator, n);
-            errdefer p.deinit(allocator);
+            var edges = try ArrayListUnmanaged(T).initCapacity(allocator, n);
+            errdefer edges.deinit(allocator);
+            var child_nodes = try ArrayListUnmanaged(S).initCapacity(allocator, n);
+            errdefer child_nodes.deinit(allocator);
             return Self{
-                .edges = l,
-                .child_nodes = p,
+                .edges = edges,
+                .child_nodes = child_nodes,
             };
         }
 
@@ -53,7 +53,7 @@ pub fn PrefixTree(comptime T: type) type {
         }
 
         // FIXME recursive
-        pub fn deallocRecursive(self: *Self, allocator: *Allocator) void {
+        fn deallocRecursive(self: *Self, allocator: *Allocator) void {
             for (self.child_nodes.items) |p| {
                 if (p.s) |node| node.deallocRecursive(allocator);
             }
@@ -61,13 +61,24 @@ pub fn PrefixTree(comptime T: type) type {
             allocator.destroy(self);
         }
 
+        fn exists(self: *const Self, item: []const T) bool {
+            if (item.len == 0) return true;
+
+            var current = self;
+            for (item[0 .. item.len - 1]) |i| {
+                const edge_index = current.indexOf(i) orelse return false;
+                current = current.child_nodes.items[edge_index].s orelse return false;
+            }
+            return current.indexOf(item[item.len - 1]) != null;
+        }
+
         fn indexOf(self: Self, edge: T) ?usize {
-            const cmpFn = struct {
+            const cmp = struct {
                 fn f(ctx: void, lhs: T, rhs: T) std.math.Order {
-                    return std.math.order(lhs, rhs);
+                    return cmpFn(lhs, rhs);
                 }
             }.f;
-            return std.sort.binarySearch(T, edge, self.edges.items, {}, cmpFn);
+            return std.sort.binarySearch(T, edge, self.edges.items, {}, cmp);
         }
 
         fn newEdge(self: *Self, edge: T, allocator: *Allocator) !usize {
@@ -84,7 +95,76 @@ pub fn PrefixTree(comptime T: type) type {
             if (self.child_nodes.orderedRemove(edge_index).s) |p| allocator.destroy(p);
         }
 
-        pub fn clone(self: Self, allocator: *Allocator) Allocator.Error!*Self {
+        fn insert(self: *Self, item: []const T, allocator: *Allocator) !void {
+            if (item.len == 0) return;
+
+            var last_edge_index: usize = undefined;
+            var last_edge_is_new = false;
+
+            var current_node = self;
+            var i: usize = 0;
+            while (i < item.len) : (i += 1) {
+                const edge = item[i];
+                if (current_node.indexOf(edge)) |edge_index| {
+                    if (current_node.child_nodes.items[edge_index].s) |p| {
+                        current_node = p;
+                    } else {
+                        last_edge_index = edge_index;
+                        break;
+                    }
+                } else {
+                    last_edge_index = try current_node.newEdge(edge, allocator);
+                    last_edge_is_new = true;
+                    break;
+                }
+            }
+
+            if (i < item.len - 1) {
+                errdefer if (last_edge_is_new) current_node.deleteEdge(last_edge_index, allocator);
+
+                const the_rest = try createBranch(item[i + 1 ..], allocator);
+                errdefer the_rest.deallocRecursive(allocator);
+                current_node.child_nodes.items[last_edge_index] = .{ .s = the_rest };
+            }
+        }
+
+        // Must be at least 1 element in item
+        fn createBranch(item: []const T, allocator: *Allocator) !*Self {
+            var list = try std.ArrayList(*Self).initCapacity(allocator, item.len);
+            defer list.deinit();
+            errdefer for (list.items) |node| {
+                node.deinit(allocator);
+                allocator.destroy(node);
+            };
+
+            const singleItemNode = (struct {
+                fn f(edge: T, alloc: *Allocator) !*Self {
+                    const new_node = try alloc.create(Self);
+                    errdefer alloc.destroy(new_node);
+
+                    new_node.* = try Self.initCapacity(alloc, 1);
+                    errdefer new_node.deinit(alloc);
+
+                    new_node.edges.appendAssumeCapacity(edge);
+                    new_node.child_nodes.appendAssumeCapacity(.{ .s = null });
+                    return new_node;
+                }
+            }).f;
+
+            const first_node = try singleItemNode(item[0], allocator);
+            list.appendAssumeCapacity(first_node);
+
+            var i: usize = 1;
+            while (i < item.len) : (i += 1) {
+                const new_node = try singleItemNode(item[i], allocator);
+                list.appendAssumeCapacity(new_node);
+                list.items[i - 1].child_nodes.items[0] = .{ .s = new_node };
+            }
+
+            return list.items[0];
+        }
+
+        fn clone(self: Self, allocator: *Allocator) Allocator.Error!*Self {
             const clone_result = internalClone(self, allocator);
             if (clone_result.err) |err| {
                 if (clone_result.node) |node| node.deallocRecursive(allocator);
@@ -120,42 +200,38 @@ pub fn PrefixTree(comptime T: type) type {
             return .{ .node = result, .err = null };
         }
 
-        pub fn format(value: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-            return internalFormat(value, writer, fmt);
-        }
-
         // FIXME recursive
-        fn internalFormat(self: Self, writer: anytype, comptime fmt: []const u8) @TypeOf(writer).Error!void {
+        fn format(self: Self, writer: anytype, comptime fmt: []const u8) @TypeOf(writer).Error!void {
             const fmt_string = "({" ++ fmt ++ "}";
             try writer.print(fmt_string, .{self.edges.items[0]});
-            if (self.child_nodes.items[0].s) |p| {
+            if (self.child_nodes.items[0].s) |child| {
                 try writer.writeAll(" ");
-                try p.internalFormat(writer, fmt);
+                try child.format(writer, fmt);
             }
             try writer.writeAll(")");
 
             if (self.edges.items.len > 0) {
                 for (self.edges.items[1..]) |edge, i| {
                     try writer.print(" " ++ fmt_string, .{edge});
-                    if (self.child_nodes.items[1..][i].s) |p| {
+                    if (self.child_nodes.items[1..][i].s) |child| {
                         try writer.writeAll(" ");
-                        try p.internalFormat(writer, fmt);
+                        try child.format(writer, fmt);
                     }
                     try writer.writeAll(")");
                 }
             }
         }
 
-        pub const Leaves = struct {
+        const Leaves = struct {
             items: [][]T,
             allocator: *Allocator,
 
-            pub fn free(self: @This()) void {
+            fn free(self: @This()) void {
                 for (self.items) |leaf| self.allocator.free(leaf);
             }
         };
 
-        pub fn getLeaves(self: *const Self, allocator: *Allocator) !Leaves {
+        fn getLeaves(self: *const Self, allocator: *Allocator) !Leaves {
             var stack = ArrayList(T).init(allocator);
             defer stack.deinit();
 
@@ -184,9 +260,12 @@ pub fn PrefixTree(comptime T: type) type {
             }
         }
     };
+}
 
+pub fn PrefixTree(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math.Order) type {
     return struct {
         const Self = @This();
+        const Node = PrefixTreeNode(T, cmpFn);
 
         root: *Node,
         allocator: *Allocator,
@@ -205,83 +284,11 @@ pub fn PrefixTree(comptime T: type) type {
         }
 
         pub fn exists(self: Self, item: []const T) bool {
-            if (item.len == 0) return true;
-
-            var current = self.root;
-            for (item[0 .. item.len - 1]) |i| {
-                const edge_index = current.indexOf(i) orelse return false;
-                current = current.child_nodes.items[edge_index].s orelse return false;
-            }
-            return current.indexOf(item[item.len - 1]) != null;
+            return self.root.exists(item);
         }
 
-        // Must be at least 1 element in item
-        fn makeNodeChain(item: []const T, allocator: *Allocator) !*Node {
-            var list = try std.ArrayList(*Node).initCapacity(allocator, item.len);
-            defer list.deinit();
-            errdefer for (list.items) |node| {
-                node.deinit(allocator);
-                allocator.destroy(node);
-            };
-
-            const singleItemNode = (struct {
-                fn f(edge: T, alloc: *Allocator) !*Node {
-                    const new_node = try alloc.create(Node);
-                    errdefer alloc.destroy(new_node);
-
-                    new_node.* = try Node.initCapacity(alloc, 1);
-                    errdefer new_node.deinit(alloc);
-
-                    new_node.edges.appendAssumeCapacity(edge);
-                    new_node.child_nodes.appendAssumeCapacity(.{ .s = null });
-                    return new_node;
-                }
-            }).f;
-
-            const first_node = try singleItemNode(item[0], allocator);
-            list.appendAssumeCapacity(first_node);
-
-            var i: usize = 1;
-            while (i < item.len) : (i += 1) {
-                const new_node = try singleItemNode(item[i], allocator);
-                list.appendAssumeCapacity(new_node);
-                list.items[i - 1].child_nodes.items[0] = .{ .s = new_node };
-            }
-
-            return list.items[0];
-        }
-
-        pub fn insert(self: *Self, item: []const T) !void {
-            if (item.len == 0) return;
-
-            var last_edge_index: usize = undefined;
-            var last_edge_is_new = false;
-
-            var current_node = self.root;
-            var i: usize = 0;
-            while (i < item.len) : (i += 1) {
-                const edge = item[i];
-                if (current_node.indexOf(edge)) |edge_index| {
-                    if (current_node.child_nodes.items[edge_index].s) |p| {
-                        current_node = p;
-                    } else {
-                        last_edge_index = edge_index;
-                        break;
-                    }
-                } else {
-                    last_edge_index = try current_node.newEdge(edge, self.allocator);
-                    last_edge_is_new = true;
-                    break;
-                }
-            }
-
-            if (i < item.len - 1) {
-                errdefer if (last_edge_is_new) current_node.deleteEdge(last_edge_index, self.allocator);
-
-                const the_rest = try makeNodeChain(item[i + 1 ..], self.allocator);
-                errdefer the_rest.deallocRecursive(self.allocator);
-                current_node.child_nodes.items[last_edge_index] = .{ .s = the_rest };
-            }
+        pub fn insert(self: Self, item: []const T) !void {
+            return self.root.insert(item, self.allocator);
         }
 
         pub fn clone(self: Self, allocator: *Allocator) !Self {
@@ -301,14 +308,24 @@ pub fn PrefixTree(comptime T: type) type {
             for (second_leaves.items) |leaf| try copy.insert(leaf);
             return copy;
         }
+
+        pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+            return self.root.format(writer, fmt);
+        }
     };
 }
 
 test "sample tree" {
+    const cmpFn = (struct {
+        fn f(lhs: u8, rhs: u8) std.math.Order {
+            return std.math.order(lhs, rhs);
+        }
+    }).f;
+
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
-    var tree = try PrefixTree(u8).init(&arena.allocator);
+    var tree = try PrefixTree(u8, cmpFn).init(&arena.allocator);
     defer tree.deinit();
 
     expect(tree.exists(""));
@@ -331,11 +348,11 @@ test "sample tree" {
     try tree.insert("bean-truck");
 
     const stdout = std.io.getStdOut().writer();
-    try stdout.print("{c}\n", .{tree.root});
+    try stdout.print("{c}\n", .{tree});
 
     var tree_clone = try tree.clone(tree.allocator);
     defer tree_clone.deinit();
-    try stdout.print("{c}\n", .{tree_clone.root});
+    try stdout.print("{c}\n", .{tree_clone});
 
     const leaves = try tree.root.getLeaves(&arena.allocator);
     defer leaves.free();
@@ -344,7 +361,7 @@ test "sample tree" {
     }
 
     var second_tree = blk: {
-        var res = try PrefixTree(u8).init(&arena.allocator);
+        var res = try PrefixTree(u8, cmpFn).init(&arena.allocator);
         errdefer res.deinit();
         try res.insert("roadmap");
         try res.insert("beethoven");
@@ -362,5 +379,5 @@ test "sample tree" {
 
     var merged = try tree.merge(second_tree, &arena.allocator);
     defer merged.deinit();
-    try stdout.print("{c}\n", .{merged.root});
+    try stdout.print("{c}\n", .{merged});
 }
