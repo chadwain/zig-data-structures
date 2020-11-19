@@ -54,8 +54,8 @@ fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math
 
         // FIXME recursive
         fn deallocRecursive(self: *Self, allocator: *Allocator) void {
-            for (self.child_nodes.items) |p| {
-                if (p.s) |node| node.deallocRecursive(allocator);
+            for (self.child_nodes.items) |child| {
+                if (child.s) |node| node.deallocRecursive(allocator);
             }
             self.deinit(allocator);
             allocator.destroy(self);
@@ -65,8 +65,8 @@ fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math
             if (item.len == 0) return true;
 
             var current = self;
-            for (item[0 .. item.len - 1]) |i| {
-                const edge_index = current.indexOf(i) orelse return false;
+            for (item[0 .. item.len - 1]) |edge| {
+                const edge_index = current.indexOf(edge) orelse return false;
                 current = current.child_nodes.items[edge_index].s orelse return false;
             }
             return current.indexOf(item[item.len - 1]) != null;
@@ -90,9 +90,10 @@ fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math
             return index;
         }
 
-        fn deleteEdge(self: *Self, edge_index: usize, allocator: *Allocator) void {
+        /// Delete the most recent edge that was just created by newEdge
+        fn deleteNewEdge(self: *Self, edge_index: usize, allocator: *Allocator) void {
             _ = self.edges.orderedRemove(edge_index);
-            if (self.child_nodes.orderedRemove(edge_index).s) |p| allocator.destroy(p);
+            _ = self.child_nodes.orderedRemove(edge_index);
         }
 
         fn insert(self: *Self, item: []const T, allocator: *Allocator) !void {
@@ -106,8 +107,8 @@ fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math
             while (i < item.len) : (i += 1) {
                 const edge = item[i];
                 if (current_node.indexOf(edge)) |edge_index| {
-                    if (current_node.child_nodes.items[edge_index].s) |p| {
-                        current_node = p;
+                    if (current_node.child_nodes.items[edge_index].s) |child| {
+                        current_node = child;
                     } else {
                         last_edge_index = edge_index;
                         break;
@@ -120,7 +121,7 @@ fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math
             }
 
             if (i < item.len - 1) {
-                errdefer if (last_edge_is_new) current_node.deleteEdge(last_edge_index, allocator);
+                errdefer if (last_edge_is_new) current_node.deleteNewEdge(last_edge_index, allocator);
 
                 const the_rest = try createBranch(item[i + 1 ..], allocator);
                 errdefer the_rest.deallocRecursive(allocator);
@@ -137,7 +138,7 @@ fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math
                 allocator.destroy(node);
             };
 
-            const singleItemNode = (struct {
+            const singleEdgeNode = (struct {
                 fn f(edge: T, alloc: *Allocator) !*Self {
                     const new_node = try alloc.create(Self);
                     errdefer alloc.destroy(new_node);
@@ -151,12 +152,12 @@ fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math
                 }
             }).f;
 
-            const first_node = try singleItemNode(item[0], allocator);
+            const first_node = try singleEdgeNode(item[0], allocator);
             list.appendAssumeCapacity(first_node);
 
             var i: usize = 1;
             while (i < item.len) : (i += 1) {
-                const new_node = try singleItemNode(item[i], allocator);
+                const new_node = try singleEdgeNode(item[i], allocator);
                 list.appendAssumeCapacity(new_node);
                 list.items[i - 1].child_nodes.items[0] = .{ .s = new_node };
             }
@@ -187,8 +188,8 @@ fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math
 
             result.child_nodes = ArrayListUnmanaged(S).initCapacity(allocator, self.edges.items.len) catch |err| return .{ .node = result, .err = err };
 
-            for (self.child_nodes.items) |p| {
-                if (p.s) |node| {
+            for (self.child_nodes.items) |child| {
+                if (child.s) |node| {
                     const child_clone_result = node.internalClone(allocator);
                     result.child_nodes.appendAssumeCapacity(.{ .s = child_clone_result.node });
                     if (child_clone_result.err) |_| return .{ .node = result, .err = child_clone_result.err };
