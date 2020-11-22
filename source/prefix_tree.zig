@@ -5,28 +5,6 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const assert = std.debug.assert;
 const expect = std.testing.expect;
 
-/// Stolen from std.sort.binarySearch.
-fn searchForInsertPosition(
-    comptime T: type,
-    key: T,
-    items: []const T,
-) usize {
-    var left: usize = 0;
-    var right: usize = items.len;
-
-    while (left < right) {
-        // Avoid overflowing in the midpoint calculation
-        const mid = left + (right - left) / 2;
-        // Compare the key with the midpoint element
-        switch (key < items[mid]) {
-            false => left = mid + 1,
-            true => right = mid,
-        }
-    }
-
-    return left;
-}
-
 fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math.Order) type {
     return struct {
         const Self = @This();
@@ -81,8 +59,41 @@ fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math
             return std.sort.binarySearch(T, edge, self.edges.items, {}, cmp);
         }
 
+        fn getNode(self: *const Self, item: []const T) ?*const Self {
+            if (item.len == 0) return self;
+
+            var current = self;
+            for (item[0 .. item.len - 1]) |edge| {
+                const edge_index = current.indexOf(edge) orelse return null;
+                current = current.child_nodes.items[edge_index].s orelse return null;
+            }
+            return if (current.indexOf(item[item.len - 1])) |i| current.child_nodes.items[i].s else null;
+        }
+
+        /// Stolen from std.sort.binarySearch.
+        fn searchForInsertPosition(
+            key: T,
+            items: []const T,
+        ) usize {
+            var left: usize = 0;
+            var right: usize = items.len;
+
+            while (left < right) {
+                // Avoid overflowing in the midpoint calculation
+                const mid = left + (right - left) / 2;
+                // Compare the key with the midpoint element
+                switch (cmpFn(key, items[mid])) {
+                    .eq => unreachable,
+                    .gt => left = mid + 1,
+                    .lt => right = mid,
+                }
+            }
+
+            return left;
+        }
+
         fn newEdge(self: *Self, edge: T, allocator: *Allocator) !usize {
-            const index = searchForInsertPosition(T, edge, self.edges.items);
+            const index = searchForInsertPosition(edge, self.edges.items);
             try self.edges.insert(allocator, index, edge);
             errdefer _ = self.edges.orderedRemove(index);
             try self.child_nodes.insert(allocator, index, .{ .s = null });
@@ -312,6 +323,10 @@ pub fn PrefixTree(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math
 
         pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
             return self.root.format(writer, fmt);
+        }
+
+        pub fn getNode(self: Self, item: []const T) ?*const Node {
+            return self.root.getNode(item);
         }
     };
 }
