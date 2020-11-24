@@ -59,17 +59,6 @@ fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math
             return std.sort.binarySearch(T, edge, self.edges.items, {}, cmp);
         }
 
-        fn getNode(self: *const Self, item: []const T) ?*const Self {
-            if (item.len == 0) return self;
-
-            var current = self;
-            for (item[0 .. item.len - 1]) |edge| {
-                const edge_index = current.indexOf(edge) orelse return null;
-                current = current.child_nodes.items[edge_index].s orelse return null;
-            }
-            return if (current.indexOf(item[item.len - 1])) |i| current.child_nodes.items[i].s else null;
-        }
-
         /// Stolen from std.sort.binarySearch.
         fn searchForInsertPosition(
             key: T,
@@ -323,10 +312,6 @@ pub fn PrefixTree(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math
 
         pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
             return self.root.format(writer, fmt);
-        }
-
-        pub fn getNode(self: Self, item: []const T) ?*const Node {
-            return self.root.getNode(item);
         }
     };
 }
