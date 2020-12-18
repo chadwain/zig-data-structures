@@ -75,6 +75,10 @@ pub fn PrefixTreeMapUnmanaged(comptime K: type, comptime V: type, comptime cmpFn
             return self.child_nodes.items.len;
         }
 
+        pub fn contains(self: Self, k: K) bool {
+            return self.indexOf(k) != null;
+        }
+
         pub fn exists(self: *const Self, key: []const K) bool {
             return self.find(key) != null;
         }
@@ -91,12 +95,14 @@ pub fn PrefixTreeMapUnmanaged(comptime K: type, comptime V: type, comptime cmpFn
             };
             errdefer if (parent_node_ptr.s == null) allocator.destroy(parent_node);
 
+            assert(!parent_node.contains(k));
             const index = try parent_node.newEdge(k, v, allocator);
             errdefer parent_node.deleteNewEdge(index, allocator);
             parent_node_ptr.s = parent_node;
         }
 
         pub fn insertChildRoot(self: *Self, k: K, v: V, allocator: *Allocator) !void {
+            assert(!self.contains(k));
             _ = try self.newEdge(k, v, allocator);
         }
 
