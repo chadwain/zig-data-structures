@@ -5,7 +5,7 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const assert = std.debug.assert;
 const expect = std.testing.expect;
 
-fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math.Order) type {
+pub fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math.Order) type {
     return struct {
         const Self = @This();
         // https://github.com/ziglang/zig/issues/4562
@@ -31,15 +31,27 @@ fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math
         }
 
         // FIXME recursive
-        fn deallocRecursive(self: *Self, allocator: *Allocator) void {
-            for (self.child_nodes.items) |child| {
-                if (child.s) |node| node.deallocRecursive(allocator);
+        pub fn deallocRecursive(self: *Self, allocator: *Allocator) void {
+            for (self.child_nodes.items) |child_node| {
+                if (child_node.s) |node| node.deallocRecursive(allocator);
             }
             self.deinit(allocator);
             allocator.destroy(self);
         }
 
-        fn exists(self: *const Self, item: []const T) bool {
+        pub fn get(self: Self, index: usize) T {
+            return self.edges.items[index];
+        }
+
+        pub fn child(self: Self, index: usize) ?*Self {
+            return self.child_nodes.items[index].s;
+        }
+
+        pub fn numChildren(self: Self) usize {
+            return self.child_nodes.items.len;
+        }
+
+        pub fn exists(self: *const Self, item: []const T) bool {
             if (item.len == 0) return true;
 
             var current = self;
@@ -57,6 +69,48 @@ fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math
                 }
             }.f;
             return std.sort.binarySearch(T, edge, self.edges.items, {}, cmp);
+        }
+
+        pub fn insertChild(self: *Self, parent: []const T, value: T, allocator: *Allocator) !void {
+            const parent_node_or_ptr = self.getNodeOrNodePtr(parent) orelse unreachable;
+            const parent_node = switch (parent_node_or_ptr) {
+                .node => |n| blk: {
+                    assert(n.indexOf(value) == null);
+                    break :blk n;
+                },
+                .node_ptr => blk: {
+                    const new_node = try allocator.create(Self);
+                    new_node.* = Self{};
+                    break :blk new_node;
+                },
+            };
+            errdefer if (parent_node_or_ptr == .node_ptr) allocator.destroy(parent_node);
+
+            _ = try parent_node.newEdge(value, allocator);
+            if (parent_node_or_ptr == .node_ptr) parent_node_or_ptr.node_ptr.s = parent_node;
+        }
+
+        const GetNodeOrNodePtr = union(enum) {
+            node: *Self,
+            node_ptr: *S,
+        };
+
+        fn getNodeOrNodePtr(self: *Self, item: []const T) ?GetNodeOrNodePtr {
+            if (item.len == 0) return GetNodeOrNodePtr{ .node = self };
+
+            var current = self;
+            for (item[0 .. item.len - 1]) |edge| {
+                const edge_index = current.indexOf(edge) orelse return null;
+                current = current.child(edge_index) orelse return null;
+            }
+
+            const i = current.indexOf(item[item.len - 1]) orelse return null;
+            const node_ptr = &current.child_nodes.items[i];
+            if (node_ptr.s) |node| {
+                return GetNodeOrNodePtr{ .node = node };
+            } else {
+                return GetNodeOrNodePtr{ .node_ptr = node_ptr };
+            }
         }
 
         /// Stolen from std.sort.binarySearch.
@@ -96,7 +150,7 @@ fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math
             _ = self.child_nodes.orderedRemove(edge_index);
         }
 
-        fn insert(self: *Self, item: []const T, allocator: *Allocator) !void {
+        pub fn insert(self: *Self, item: []const T, allocator: *Allocator) !void {
             if (item.len == 0) return;
 
             var last_edge_index: usize = undefined;
@@ -107,8 +161,8 @@ fn PrefixTreeNode(comptime T: type, comptime cmpFn: fn (lhs: T, rhs: T) std.math
             while (i < item.len) : (i += 1) {
                 const edge = item[i];
                 if (current_node.indexOf(edge)) |edge_index| {
-                    if (current_node.child_nodes.items[edge_index].s) |child| {
-                        current_node = child;
+                    if (current_node.child(edge_index)) |child_node| {
+                        current_node = child_node;
                     } else {
                         last_edge_index = edge_index;
                         break;
