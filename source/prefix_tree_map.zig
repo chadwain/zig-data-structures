@@ -37,34 +37,12 @@ pub fn PrefixTreeMapUnmanaged(comptime K: type, comptime V: type, comptime cmpFn
             allocator.destroy(self);
         }
 
-        pub const FindResult = struct {
-            parent: *const Self,
-            index: usize,
-        };
-
-        pub fn find(self: *const Self, key: []const K) ?FindResult {
-            if (key.len == 0) return null;
-
-            var current = self;
-            for (key[0 .. key.len - 1]) |part| {
-                const part_index = current.indexOf(part) orelse return null;
-                current = current.child(part_index) orelse return null;
-            }
-
-            const index = current.indexOf(key[key.len - 1]) orelse return null;
-            return FindResult{ .parent = current, .index = index };
-        }
-
-        pub fn get(self: Self, key: []const K) V {
-            return self.getFromFind(self.find(key) orelse unreachable);
-        }
-
-        pub fn getFromFind(self: Self, find_result: FindResult) V {
-            return find_result.parent.value(find_result.index);
-        }
-
         pub fn value(self: Self, index: usize) V {
             return self.values.items[index];
+        }
+
+        pub fn valuePtr(self: Self, index: usize) *V {
+            return &self.values.items[index];
         }
 
         pub fn child(self: Self, index: usize) ?*Self {
@@ -75,35 +53,115 @@ pub fn PrefixTreeMapUnmanaged(comptime K: type, comptime V: type, comptime cmpFn
             return self.child_nodes.items.len;
         }
 
-        pub fn contains(self: Self, k: K) bool {
-            return self.indexOf(k) != null;
+        pub fn hasPart(self: Self, part: K) bool {
+            return self.indexOf(part) != null;
+        }
+
+        pub const FindResult = struct {
+            parent: *const Self,
+            index: usize,
+            remaining: usize,
+
+            pub fn wasFound(self: @This()) bool {
+                return self.remaining == 0;
+            }
+
+            pub fn getFromFind(self: @This()) ?V {
+                return if (self.wasFound())
+                    self.parent.value(self.index)
+                else
+                    null;
+            }
+
+            pub fn getPtrFromFind(self: @This()) ?*V {
+                return if (self.wasFound())
+                    self.parent.valuePtr(self.index)
+                else
+                    null;
+            }
+        };
+
+        pub fn find(self: *const Self, key: []const K) FindResult {
+            assert(key.len > 0);
+            var result = FindResult{
+                .parent = undefined,
+                .index = undefined,
+                .remaining = key.len,
+            };
+
+            var next = self;
+            for (key) |part| {
+                const child_index = next.indexOf(part) orelse break;
+                result = FindResult{
+                    .parent = next,
+                    .index = child_index,
+                    .remaining = result.remaining - 1,
+                };
+                next = next.child(child_index) orelse break;
+            }
+
+            return result;
+        }
+
+        pub fn get(self: *const Self, key: []const K) ?V {
+            return self.find(key).getFromFind();
         }
 
         pub fn exists(self: *const Self, key: []const K) bool {
-            return self.find(key) != null;
+            return self.find(key).wasFound();
         }
 
-        pub fn insertChild(self: *Self, parent: []const K, k: K, v: V, allocator: *Allocator) !void {
-            if (parent.len == 0) return insertChildRoot(self, k, v, allocator);
-
-            const parent_elem = self.find(parent) orelse unreachable;
-            const parent_node_ptr = &parent_elem.parent.child_nodes.items[parent_elem.index];
-            const parent_node = if (parent_node_ptr.s) |n| n else blk: {
-                const new_node = try allocator.create(Self);
-                new_node.* = Self{};
-                break :blk new_node;
-            };
-            errdefer if (parent_node_ptr.s == null) allocator.destroy(parent_node);
-
-            assert(!parent_node.contains(k));
-            const index = try parent_node.newEdge(k, v, allocator);
-            errdefer parent_node.deleteNewEdge(index, allocator);
-            parent_node_ptr.s = parent_node;
+        /// Inserts a new key-value pair into the tree, filling any newly created intermediate
+        /// key-value pairs with `filler`. If there was already a value associated with the key,
+        /// it is returned.
+        pub fn insert(self: *Self, allocator: *Allocator, key: []const K, val: V, filler: V) !?V {
+            return insertWithFind(self, allocator, key, val, filler, self.find(key));
         }
 
-        pub fn insertChildRoot(self: *Self, k: K, v: V, allocator: *Allocator) !void {
-            assert(!self.contains(k));
-            _ = try self.newEdge(k, v, allocator);
+        /// Inserts a new key-value pair into the tree, filling any newly created intermediate
+        /// key-value pairs with `filler`. If there was already a value associated with the key,
+        /// it is returned. A `FindResult` is used to skip traversing some of the tree.
+        pub fn insertWithFind(self: *Self, allocator: *Allocator, key: []const K, val: V, filler: V, find_result: FindResult) !?V {
+            if (find_result.wasFound()) {
+                const ptr = find_result.parent.valuePtr(find_result.index);
+                const old = ptr.*;
+                ptr.* = val;
+                return old;
+            } else if (find_result.remaining == key.len) {
+                try insertBranch(self, allocator, key, val, filler);
+                return null;
+            } else {
+                try insertMaybeCreateChildNode(allocator, key, val, filler, find_result);
+                return null;
+            }
+        }
+
+        fn insertMaybeCreateChildNode(allocator: *Allocator, key: []const K, val: V, filler: V, find_result: FindResult) !void {
+            assert(find_result.remaining != key.len);
+            const child_node_ptr = &find_result.parent.child_nodes.items[find_result.index].s;
+            if (child_node_ptr.*) |child_node| {
+                try insertBranch(child_node, allocator, key[key.len - find_result.remaining ..], val, filler);
+            } else {
+                const child_node = try init(allocator);
+                errdefer allocator.destroy(child_node);
+                try insertBranch(child_node, allocator, key[key.len - find_result.remaining ..], val, filler);
+                child_node_ptr.* = child_node;
+            }
+        }
+
+        fn insertBranch(parent: *Self, allocator: *Allocator, key: []const K, val: V, filler: V) !void {
+            if (key.len == 1) {
+                return attachBranch(parent, allocator, key[0], val, null);
+            } else {
+                const branch = try newBranch(allocator, key[1..], val, filler);
+                errdefer branch.deinit(allocator);
+                return attachBranch(parent, allocator, key[0], filler, branch);
+            }
+        }
+
+        fn attachBranch(parent: *Self, allocator: *Allocator, part: K, val: V, branch: ?*Self) !void {
+            const index = try parent.newEdge(allocator, part, val);
+            parent.child_nodes.items[index].s = branch;
         }
 
         fn indexOf(self: Self, part: K) ?usize {
@@ -137,22 +195,37 @@ pub fn PrefixTreeMapUnmanaged(comptime K: type, comptime V: type, comptime cmpFn
             return left;
         }
 
-        fn newEdge(self: *Self, k: K, v: V, allocator: *Allocator) !usize {
-            const index = searchForInsertPosition(k, self.parts.items);
-            try self.parts.insert(allocator, index, k);
+        fn newEdge(self: *Self, allocator: *Allocator, part: K, val: V) !usize {
+            assert(!self.hasPart(part)); // Edge already exists.
+            const index = searchForInsertPosition(part, self.parts.items);
+            try self.parts.insert(allocator, index, part);
             errdefer _ = self.parts.orderedRemove(index);
-            try self.values.insert(allocator, index, v);
+            try self.values.insert(allocator, index, val);
             errdefer _ = self.values.orderedRemove(index);
             try self.child_nodes.insert(allocator, index, .{ .s = null });
             errdefer _ = self.child_nodes.orderedRemove(index);
             return index;
         }
 
-        /// Delete the most recent edge that was just created by newEdge
-        fn deleteNewEdge(self: *Self, edge_index: usize, allocator: *Allocator) void {
-            _ = self.parts.orderedRemove(edge_index);
-            _ = self.values.orderedRemove(edge_index);
-            _ = self.child_nodes.orderedRemove(edge_index);
+        fn newBranch(allocator: *Allocator, key: []const K, val: V, filler: V) !*Self {
+            var top = try allocator.create(Self);
+            top.* = Self{};
+            errdefer top.deinit(allocator);
+            _ = try top.newEdge(allocator, key[0], filler);
+
+            var previous = top;
+            for (key[1..]) |part| {
+                var current = try allocator.create(Self);
+                current.* = Self{};
+                errdefer allocator.destroy(current);
+                _ = try current.newEdge(allocator, part, filler);
+                previous.child_nodes.items[0].s = current;
+                previous = current;
+            }
+
+            previous.valuePtr(0).* = val;
+
+            return top;
         }
     };
 }
@@ -171,18 +244,24 @@ test "sample tree" {
     var tree = try PrefixTreeMapUnmanaged(u8, i32, cmpFn).init(allocator);
     defer tree.deinit(allocator);
 
-    expect(!tree.exists(""));
     expect(!tree.exists("a"));
-    try tree.insertChild("", 'a', -64, allocator);
-    try tree.insertChild("", 'b', 100, allocator);
-    try tree.insertChild("a", 'b', 42, allocator);
+    expect((try tree.insert(allocator, "a", -64, 0)) == null);
+    expect((try tree.insert(allocator, "b", 100, 0)) == null);
+    expect((try tree.insert(allocator, "ab", 42, 0)) == null);
     expect(tree.exists("a"));
     expect(tree.exists("b"));
     expect(tree.exists("ab"));
     expect(!tree.exists("c"));
     expect(!tree.exists("ba"));
     expect(!tree.exists("abc"));
-    expect(tree.get("a") == -64);
-    expect(tree.get("b") == 100);
-    expect(tree.get("ab") == 42);
+    expect(tree.get("a").? == -64);
+    expect(tree.get("b").? == 100);
+    expect(tree.get("ab").? == 42);
+    expect((try tree.insert(allocator, "zyx", 1729, 1)) == null);
+    expect(tree.exists("zyx"));
+    expect(tree.exists("zy"));
+    expect(tree.exists("z"));
+    expect(tree.get("zyx").? == 1729);
+    expect(tree.get("zy").? == 1);
+    expect(tree.get("z").? == 1);
 }
