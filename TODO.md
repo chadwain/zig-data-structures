@@ -1,4 +1,5 @@
 * PrefixTreeMapUnmanaged
+    - Key management
     - The ability to insert relative to a parent
     - Implement remove (recursive and non-recursive) functions
     - Have a way to know the required stack size for functions that take stacks

@@ -44,12 +44,6 @@ pub fn PrefixTreeMapUnmanaged(comptime K: type, comptime V: type, comptime cmpFn
         values: ArrayListUnmanaged(V) = ArrayListUnmanaged(V){},
         child_nodes: ArrayListUnmanaged(S) = ArrayListUnmanaged(S){},
 
-        pub fn init(allocator: *Allocator) !*Self {
-            const result = try allocator.create(Self);
-            result.* = Self{};
-            return result;
-        }
-
         fn clear(self: *Self, allocator: *Allocator) void {
             self.parts.deinit(allocator);
             self.values.deinit(allocator);
@@ -57,8 +51,14 @@ pub fn PrefixTreeMapUnmanaged(comptime K: type, comptime V: type, comptime cmpFn
         }
 
         pub fn deinit(self: *Self, allocator: *Allocator, stack: []*Self) void {
-            var count: usize = 1;
-            stack[0] = self;
+            var count: usize = 0;
+            for (self.child_nodes.items) |child_node, i| {
+                if (child_node.s) |n| {
+                    stack[count] = n;
+                    count += 1;
+                }
+            }
+
             while (count > 0) {
                 const node = stack[count - 1];
                 count -= 1;
@@ -71,14 +71,31 @@ pub fn PrefixTreeMapUnmanaged(comptime K: type, comptime V: type, comptime cmpFn
                 node.clear(allocator);
                 allocator.destroy(node);
             }
+
+            self.clear(allocator);
         }
 
         pub fn deinitRecursive(self: *Self, allocator: *Allocator) void {
+            const impl = struct {
+                fn f(node: *Self, a: *Allocator) void {
+                    for (node.child_nodes.items) |child_node| {
+                        if (child_node.s) |n| f(n, a);
+                    }
+                    node.clear(a);
+                    a.destroy(node);
+                }
+            }.f;
+
             for (self.child_nodes.items) |child_node| {
-                if (child_node.s) |node| node.deinitRecursive(allocator);
+                if (child_node.s) |n| {
+                    impl(n, allocator);
+                }
             }
             self.clear(allocator);
-            allocator.destroy(self);
+        }
+
+        pub fn part(self: Self, index: usize) K {
+            return self.parts.items[index];
         }
 
         pub fn value(self: Self, index: usize) V {
@@ -97,8 +114,8 @@ pub fn PrefixTreeMapUnmanaged(comptime K: type, comptime V: type, comptime cmpFn
             return self.child_nodes.items.len;
         }
 
-        pub fn hasPart(self: Self, part: K) bool {
-            return self.indexOf(part) != null;
+        pub fn hasPart(self: Self, p: K) bool {
+            return self.indexOf(p) != null;
         }
 
         pub fn find(self: *const Self, key: []const K) FindResult {
@@ -110,8 +127,8 @@ pub fn PrefixTreeMapUnmanaged(comptime K: type, comptime V: type, comptime cmpFn
             };
 
             var next = self;
-            for (key) |part| {
-                const child_index = next.indexOf(part) orelse break;
+            for (key) |p| {
+                const child_index = next.indexOf(p) orelse break;
                 result = FindResult{
                     .parent = next,
                     .index = child_index,
@@ -165,8 +182,9 @@ pub fn PrefixTreeMapUnmanaged(comptime K: type, comptime V: type, comptime cmpFn
             if (child_node_ptr.*) |child_node| {
                 try insertBranch(child_node, allocator, find_result.key, val, filler);
             } else {
-                const child_node = try init(allocator);
+                const child_node = try allocator.create(Self);
                 errdefer allocator.destroy(child_node);
+                child_node.* = Self{};
                 try insertBranch(child_node, allocator, find_result.key, val, filler);
                 child_node_ptr.* = child_node;
             }
@@ -182,13 +200,13 @@ pub fn PrefixTreeMapUnmanaged(comptime K: type, comptime V: type, comptime cmpFn
             }
         }
 
-        fn indexOf(self: Self, part: K) ?usize {
+        fn indexOf(self: Self, p: K) ?usize {
             const cmp = struct {
                 fn f(ctx: void, lhs: K, rhs: K) std.math.Order {
                     return cmpFn(lhs, rhs);
                 }
             }.f;
-            return std.sort.binarySearch(K, part, self.parts.items, {}, cmp);
+            return std.sort.binarySearch(K, p, self.parts.items, {}, cmp);
         }
 
         /// Stolen from std.sort.binarySearch.
@@ -213,10 +231,10 @@ pub fn PrefixTreeMapUnmanaged(comptime K: type, comptime V: type, comptime cmpFn
             return left;
         }
 
-        fn newEdge(self: *Self, allocator: *Allocator, part: K, val: V, child_node: ?*Self) !usize {
-            assert(!self.hasPart(part)); // Edge already exists.
-            const index = searchForInsertPosition(part, self.parts.items);
-            try self.parts.insert(allocator, index, part);
+        fn newEdge(self: *Self, allocator: *Allocator, p: K, val: V, child_node: ?*Self) !usize {
+            assert(!self.hasPart(p)); // Edge already exists.
+            const index = searchForInsertPosition(p, self.parts.items);
+            try self.parts.insert(allocator, index, p);
             errdefer _ = self.parts.orderedRemove(index);
             try self.values.insert(allocator, index, val);
             errdefer _ = self.values.orderedRemove(index);
@@ -232,11 +250,11 @@ pub fn PrefixTreeMapUnmanaged(comptime K: type, comptime V: type, comptime cmpFn
             _ = try top.newEdge(allocator, key[0], filler, null);
 
             var previous = top;
-            for (key[1..]) |part| {
+            for (key[1..]) |p| {
                 var current = try allocator.create(Self);
                 current.* = Self{};
                 errdefer allocator.destroy(current);
-                _ = try current.newEdge(allocator, part, filler, null);
+                _ = try current.newEdge(allocator, p, filler, null);
                 previous.child_nodes.items[0].s = current;
                 previous = current;
             }
@@ -269,7 +287,7 @@ test "sample tree" {
 
     const Tree = PrefixTreeMapUnmanaged(u8, i32, cmpFn);
     var stack = @as([3]*Tree, undefined);
-    var tree = try Tree.init(allocator);
+    var tree = Tree{};
     defer tree.deinit(allocator, &stack);
 
     expect(!tree.exists("a"));
@@ -295,4 +313,46 @@ test "sample tree" {
     expect(tree.get("z").? == 1);
     tree.getPtr("z").?.* = 5;
     expect(tree.get("z").? == 5);
+}
+
+test "empty tree" {
+    const cmpFn = (struct {
+        fn f(lhs: u8, rhs: u8) std.math.Order {
+            return std.math.order(lhs, rhs);
+        }
+    }).f;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer expect(!gpa.deinit());
+    const allocator = &gpa.allocator;
+
+    const Tree = PrefixTreeMapUnmanaged(u8, i32, cmpFn);
+    var stack = @as([3]*Tree, undefined);
+    var tree = Tree{};
+    defer tree.deinit(allocator, &stack);
+
+    var tree2 = Tree{};
+    defer tree2.deinitRecursive(allocator);
+}
+
+test "void tree" {
+    if (false) {
+        const cmpFn = (struct {
+            fn f(lhs: u8, rhs: u8) std.math.Order {
+                return std.math.order(lhs, rhs);
+            }
+        }).f;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer expect(!gpa.deinit());
+        const allocator = &gpa.allocator;
+
+        const Tree = PrefixTreeMapUnmanaged(u8, void, cmpFn);
+        var tree = Tree{};
+        defer tree.deinitRecursive(allocator);
+
+        _ = try tree.insert(allocator, "a", {}, {});
+        expect(tree.exists("a"));
+        expect(tree.get("a").? == {});
+    }
 }
