@@ -3,25 +3,40 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 
-pub fn AvlTree(comptime Value: type) type {
-    const N = struct {
+fn AvlTreeNode(comptime Value: type) type {
+    return struct {
+        const Self = @This();
         left: ?*Self = null,
         right: ?*Self = null,
         parent: ?*Self = null,
         value: Value,
         bf: i2 = 0,
 
-        const Self = @This();
+        pub fn format(node: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+            _ = options;
+            try writer.print(
+                "value={" ++ fmt ++ "}, bf={}, parent={?" ++ fmt ++ "}, left={?" ++ fmt ++ "}, right={?" ++ fmt ++ "}",
+                .{
+                    node.value,
+                    node.bf,
+                    if (node.parent) |n| @as(?Value, n.value) else null,
+                    if (node.left) |n| @as(?Value, n.value) else null,
+                    if (node.right) |n| @as(?Value, n.value) else null,
+                },
+            );
+        }
     };
+}
 
+pub fn AvlTree(comptime Value: type) type {
     return struct {
         root: ?*Node = null,
         allocator: Allocator,
 
         const Self = @This();
-        const Node = N;
+        const Node = AvlTreeNode(Value);
 
-        fn init(allocator: Allocator) !Self {
+        fn init(allocator: Allocator) Self {
             return Self{ .allocator = allocator };
         }
 
@@ -292,11 +307,11 @@ pub fn AvlTree(comptime Value: type) type {
                         node.parent = grandchild;
 
                         if (grandchild.bf == choice_int) {
-                            node.bf = -choice_int;
-                            child.bf = 0;
-                        } else if (grandchild.bf == -choice_int) {
                             node.bf = 0;
-                            child.bf = choice_int;
+                            child.bf = -choice_int;
+                        } else if (grandchild.bf == -choice_int) {
+                            node.bf = choice_int;
+                            child.bf = 0;
                         } else if (grandchild.bf == 0) {
                             node.bf = 0;
                             child.bf = 0;
@@ -330,6 +345,12 @@ pub fn AvlTree(comptime Value: type) type {
                 }
 
                 node = node.parent orelse return;
+                choice_int = choice_int: {
+                    if (successor_value) |s| {
+                        if (node.value == s) break :choice_int 1;
+                    }
+                    break :choice_int if (value < node.value) @as(i2, -1) else 1;
+                };
             }
         }
 
@@ -358,7 +379,7 @@ pub fn AvlTree(comptime Value: type) type {
             }
         }
 
-        fn showTree(tree: Self, writer: anytype) !void {
+        fn showTree(tree: Self, writer: anytype, comptime fmt: []const u8) !void {
             var stack = ArrayList(struct { node: *const Node, indent: usize, which: enum { root, left, right } }).init(tree.allocator);
             defer stack.deinit();
 
@@ -369,11 +390,121 @@ pub fn AvlTree(comptime Value: type) type {
                 const item = stack.pop();
                 const node = item.node;
                 try writer.writeByteNTimes(' ', item.indent * 4);
-                try writer.print("({s} node) value={c}, bf={}, parent={?c}\n", .{ @tagName(item.which), node.value, node.bf, if (node.parent) |p| @as(?u8, p.value) else null });
+                try writer.print(
+                    "({s} node) value={" ++ fmt ++ "}, bf={}, parent={?" ++ fmt ++ "}\n",
+                    .{ @tagName(item.which), node.value, node.bf, if (node.parent) |p| @as(?u8, p.value) else null },
+                );
 
                 if (node.right) |right| try stack.append(.{ .node = right, .indent = item.indent + 1, .which = .right });
                 if (node.left) |left| try stack.append(.{ .node = left, .indent = item.indent + 1, .which = .left });
             }
+        }
+
+        const VerifyTreeFailure = struct {
+            node: *const Node,
+            reason: enum {
+                RootHasParent,
+                MissingParent,
+                WrongParent,
+                WrongDirection,
+                WrongBalanceFactor,
+                HeightDifferenceTooLarge,
+                DuplicateValue,
+                Cycle,
+            },
+
+            fn print(failure: VerifyTreeFailure, writer: anytype, comptime fmt: []const u8, tree: Self) !void {
+                try writer.print("Invalid tree detected! Reason: {s}\n{" ++ fmt ++ "}\n", .{ @tagName(failure.reason), failure.node });
+                try tree.showTree(writer, fmt);
+            }
+        };
+
+        fn verifyTree(tree: Self) !?VerifyTreeFailure {
+            var stack = ArrayList(struct { node: ?*const Node, height_left: usize, height_right: usize, direction: enum { down, left, right } }).init(tree.allocator);
+            defer stack.deinit();
+
+            var visitied_nodes = std.AutoHashMap(*const Node, void).init(tree.allocator);
+            defer visitied_nodes.deinit();
+
+            {
+                const root = tree.root orelse return null;
+                if (root.parent) |_| return VerifyTreeFailure{ .node = root, .reason = .RootHasParent };
+                try stack.append(.{ .node = root, .height_left = undefined, .height_right = undefined, .direction = .left });
+                try stack.append(.{ .node = root.left, .height_left = undefined, .height_right = undefined, .direction = .down });
+                try visitied_nodes.put(root, {});
+            }
+
+            while (stack.items.len > 0) {
+                const this = &stack.items[stack.items.len - 1];
+                switch (this.direction) {
+                    .down => {
+                        const parent = &stack.items[stack.items.len - 2];
+                        const node = this.node orelse {
+                            switch (parent.direction) {
+                                .left => parent.height_left = 0,
+                                .right => parent.height_right = 0,
+                                else => unreachable,
+                            }
+                            _ = stack.pop();
+                            continue;
+                        };
+                        const parent_node = parent.node.?;
+
+                        if (try visitied_nodes.fetchPut(node, {})) |_| {
+                            return VerifyTreeFailure{ .node = parent_node, .reason = .Cycle };
+                        }
+
+                        if (node.parent) |node_parent| {
+                            if (node_parent != parent_node) return VerifyTreeFailure{ .node = node, .reason = .WrongParent };
+                        } else {
+                            return VerifyTreeFailure{ .node = node, .reason = .MissingParent };
+                        }
+
+                        if (node.value == parent_node.value) return VerifyTreeFailure{ .node = node, .reason = .DuplicateValue };
+                        if ((parent.direction == .left and node.value > parent_node.value) or
+                            (parent.direction == .right and node.value < parent_node.value))
+                        {
+                            return VerifyTreeFailure{ .node = node, .reason = .WrongDirection };
+                        }
+
+                        this.direction = .left;
+                        try stack.append(.{ .node = node.left, .height_left = undefined, .height_right = undefined, .direction = .down });
+                    },
+                    .left => {
+                        this.direction = .right;
+                        try stack.append(.{ .node = this.node.?.right, .height_left = undefined, .height_right = undefined, .direction = .down });
+                    },
+                    .right => {
+                        const node = this.node.?;
+
+                        if (std.math.max(this.height_left, this.height_right) - std.math.min(this.height_left, this.height_right) > 1) {
+                            return VerifyTreeFailure{ .node = node, .reason = .HeightDifferenceTooLarge };
+                        }
+
+                        if (!switch (node.bf) {
+                            -2 => unreachable,
+                            -1 => this.height_left > this.height_right,
+                            0 => this.height_left == this.height_right,
+                            1 => this.height_left < this.height_right,
+                        }) {
+                            return VerifyTreeFailure{ .node = node, .reason = .WrongBalanceFactor };
+                        }
+
+                        _ = stack.pop();
+                        if (stack.items.len > 0) {
+                            const height = std.math.max(this.height_left, this.height_right);
+                            const parent = &stack.items[stack.items.len - 1];
+                            switch (parent.direction) {
+                                .left => parent.height_left = height + 1,
+                                .right => parent.height_right = height + 1,
+                                else => unreachable,
+                            }
+                        }
+                    },
+                }
+            }
+
+            return null;
         }
     };
 }
@@ -385,17 +516,72 @@ test "avl tree" {
     const allocator = arena.allocator();
 
     const R = AvlTree(u8);
-    var tree = try R.init(allocator);
+    var tree = R.init(allocator);
 
     for ("acbdmzGAXlkw987654") |c| {
         try tree.insert(c);
-        try tree.print(writer);
-        try writer.writeByte('\n');
+        if (try tree.verifyTree()) |failure| {
+            try failure.print(writer, "c", tree);
+            return error.InvalidTree;
+        }
+    }
+
+    if (try tree.verifyTree()) |failure| {
+        try failure.print(writer, "c", tree);
+        return error.InvalidTree;
     }
 
     for ("acbdmzGAXlkw987654") |c| {
         tree.delete(c);
-        try tree.print(writer);
-        try writer.writeByte('\n');
+        if (try tree.verifyTree()) |failure| {
+            try writer.print("Failed to delete value: {c}\n", .{c});
+            try failure.print(writer, "c", tree);
+            return error.InvalidTree;
+        }
+    }
+}
+
+test "random inputs" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator); // TODO: tree.deinit
+    defer arena.deinit();
+    const writer = std.io.getStdErr().writer();
+
+    var rng = std.rand.DefaultPrng.init(0);
+    const random = rng.random();
+
+    var tree = AvlTree(u8).init(arena.allocator());
+
+    var list: [256]u8 = undefined;
+    var list_len: u9 = 0;
+    var i: u9 = 0;
+    while (i < list.len) : (i += 1) {
+        const int = random.int(u8);
+        if (!tree.exists(int)) {
+            std.debug.print("insert {}\n", .{int});
+            list[list_len] = int;
+            list_len += 1;
+            try tree.insert(int);
+            if (try tree.verifyTree()) |failure| {
+                try writer.print("Failed to delete value: {}\n", .{int});
+                try failure.print(writer, "", tree);
+                return error.InvalidTree;
+            }
+        }
+    }
+
+    i = list_len;
+    while (i > 0) : (i -= 1) {
+        const int = random.uintAtMostBiased(u8, @truncate(u8, i - 1));
+        const value = list[int];
+        assert(tree.exists(value));
+        std.debug.print("delete {}\n", .{value});
+        std.mem.swap(u8, &list[int], &list[i - 1]);
+        tree.delete(value);
+        if (try tree.verifyTree()) |failure| {
+            try writer.print("Failed to delete value: {}\n", .{value});
+            try failure.print(writer, "", tree);
+            return error.InvalidTree;
+        }
     }
 }
