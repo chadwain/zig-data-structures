@@ -35,6 +35,7 @@ pub fn AvlTree(comptime Value: type) type {
 
         const Self = @This();
         const Node = AvlTreeNode(Value);
+        const Edge = *?*Node;
 
         fn init(allocator: Allocator) Self {
             return Self{ .allocator = allocator };
@@ -68,7 +69,21 @@ pub fn AvlTree(comptime Value: type) type {
             }
         }
 
-        fn exists(tree: Self, value: Value) bool {
+        fn height(tree: Self) usize {
+            var result: usize = 0;
+            var node_opt = tree.root;
+            while (node_opt) |node| {
+                result += 1;
+                switch (node.bf) {
+                    -2 => unreachable,
+                    -1 => node_opt = node.left,
+                    0, 1 => node_opt = node.right,
+                }
+            }
+            return result;
+        }
+
+        fn find(tree: Self, value: Value) ?*Node {
             var node_opt = tree.root;
             while (node_opt) |node| {
                 if (value < node.value) {
@@ -76,10 +91,10 @@ pub fn AvlTree(comptime Value: type) type {
                 } else if (value > node.value) {
                     node_opt = node.right;
                 } else {
-                    return true;
+                    return node;
                 }
             }
-            return false;
+            return null;
         }
 
         fn insert(tree: *Self, value: Value) !void {
@@ -92,26 +107,35 @@ pub fn AvlTree(comptime Value: type) type {
             };
             while (true) {
                 if (value < parent.value) {
-                    parent = parent.left orelse break;
+                    parent = parent.left orelse {
+                        parent.left = child;
+                        parent.bf -= 1;
+                        break;
+                    };
                 } else if (value > parent.value) {
-                    parent = parent.right orelse break;
+                    parent = parent.right orelse {
+                        parent.right = child;
+                        parent.bf += 1;
+                        break;
+                    };
                 } else {
                     unreachable;
                 }
             }
 
             child.parent = parent;
-            if (value < parent.value) {
-                parent.left = child;
-                parent.bf -= 1;
-            } else {
-                parent.right = child;
-                parent.bf += 1;
+            if (rebalanceAfterInsert(parent, child, value)) |new_root| {
+                tree.root = new_root;
             }
-            if (parent.bf == 0) {
-                return;
+        }
+
+        fn rebalanceAfterInsert(parent_node: *Node, inserted_node: *Node, value: Value) ?*Node {
+            if (parent_node.bf == 0) {
+                return null;
             }
 
+            var parent = parent_node;
+            var child = inserted_node;
             while (parent.parent) |grandparent| {
                 const direction_int: i2 = if (value < grandparent.value) -1 else 1;
 
@@ -121,12 +145,12 @@ pub fn AvlTree(comptime Value: type) type {
                     grandparent.bf = direction_int;
                 } else if (grandparent.bf == -direction_int) {
                     grandparent.bf = 0;
-                    return;
+                    return null;
                 } else if (grandparent.bf == direction_int) {
-                    var grandparent_edge: *?*Node = undefined;
-                    var parent_edge: *?*Node = undefined;
-                    var child_first_edge: *?*Node = undefined;
-                    var child_second_edge: *?*Node = undefined;
+                    var grandparent_edge: Edge = undefined;
+                    var parent_edge: Edge = undefined;
+                    var child_first_edge: Edge = undefined;
+                    var child_second_edge: Edge = undefined;
                     if (value < grandparent.value) {
                         grandparent_edge = &grandparent.left;
                         parent_edge = &parent.right;
@@ -195,15 +219,17 @@ pub fn AvlTree(comptime Value: type) type {
                         } else {
                             new_parent.right = new_subtree_root;
                         }
+                        return null;
                     } else {
-                        tree.root = new_subtree_root;
+                        return new_subtree_root;
                     }
-                    return;
                 }
 
                 child = parent;
                 parent = grandparent;
             }
+
+            return null;
         }
 
         fn delete(tree: *Self, value: Value) void {
@@ -279,9 +305,9 @@ pub fn AvlTree(comptime Value: type) type {
                     node.bf = -direction_int;
                     break;
                 } else if (node.bf == -direction_int) {
-                    var node_edge: *?*Node = undefined;
+                    var node_edge: Edge = undefined;
                     var child: *Node = undefined;
-                    var child_edge: *?*Node = undefined;
+                    var child_edge: Edge = undefined;
                     if (direction_int == -1) {
                         node_edge = &node.right;
                         child = node.right.?;
@@ -309,8 +335,8 @@ pub fn AvlTree(comptime Value: type) type {
                         new_subtree_root = child;
                     } else if (child.bf == direction_int) {
                         const grandchild = child_edge.*.?;
-                        var grandchild_first_edge: *?*Node = undefined;
-                        var grandchild_second_edge: *?*Node = undefined;
+                        var grandchild_first_edge: Edge = undefined;
+                        var grandchild_second_edge: Edge = undefined;
                         if (direction_int == -1) {
                             grandchild_first_edge = &grandchild.right;
                             grandchild_second_edge = &grandchild.left;
@@ -532,11 +558,11 @@ pub fn AvlTree(comptime Value: type) type {
 
                     _ = stack.pop();
                     if (stack.items.len > 0) {
-                        const height = std.math.max(this.height_left, this.height_right);
+                        const this_height = std.math.max(this.height_left, this.height_right);
                         const parent = &stack.items[stack.items.len - 1];
                         switch (parent.direction) {
-                            .left => parent.height_left = height + 1,
-                            .right => parent.height_right = height + 1,
+                            .left => parent.height_left = this_height + 1,
+                            .right => parent.height_right = this_height + 1,
                             else => unreachable,
                         }
                     }
@@ -555,9 +581,9 @@ test "AvlTree basic usage" {
     try tree.insert('a');
     try tree.insert('f');
     try tree.insert(0);
-    assert(tree.exists('a'));
+    assert(tree.find('a') != null);
     tree.delete('a');
-    assert(!tree.exists('a'));
+    assert(tree.find('a') == null);
     try tree.insert(42);
     try tree.insert('r');
     tree.delete(0);
@@ -611,7 +637,7 @@ test "500 random values" {
     var i: u16 = 0;
     while (i < list.len) : (i += 1) {
         const value = random.int(Value);
-        if (!tree.exists(value)) {
+        if (tree.find(value) == null) {
             list[list_len] = value;
             list_len += 1;
             try tree.insert(value);
@@ -627,7 +653,7 @@ test "500 random values" {
     while (i > 0) : (i -= 1) {
         const int = random.uintAtMostBiased(u16, i - 1);
         const value = list[int];
-        assert(tree.exists(value));
+        assert(tree.find(value) != null);
         std.mem.swap(Value, &list[int], &list[i - 1]);
         tree.delete(value);
         if (try Tree.testing.verifyTree(tree)) |failure| {
