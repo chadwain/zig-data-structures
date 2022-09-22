@@ -1,16 +1,17 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const panic = std.debug.panic;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 
 fn AvlTreeNode(comptime Value: type) type {
     return struct {
         const Self = @This();
-        left: ?*Self = null,
-        right: ?*Self = null,
-        parent: ?*Self = null,
+        left: ?*Self,
+        right: ?*Self,
+        parent: ?*Self,
         value: Value,
-        bf: i2 = 0,
+        bf: i2,
 
         pub fn format(node: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
             _ = options;
@@ -98,23 +99,24 @@ pub fn AvlTree(comptime Value: type) type {
         }
 
         fn insert(tree: *Self, value: Value) !void {
-            var child = try tree.allocator.create(Node);
-            child.* = Node{ .value = value };
+            var new = try tree.allocator.create(Node);
+            new.* = Node{ .left = null, .right = null, .parent = undefined, .value = value, .bf = 0 };
 
             var parent = tree.root orelse {
-                tree.root = child;
+                new.parent = null;
+                tree.root = new;
                 return;
             };
             while (true) {
                 if (value < parent.value) {
                     parent = parent.left orelse {
-                        parent.left = child;
+                        parent.left = new;
                         parent.bf -= 1;
                         break;
                     };
                 } else if (value > parent.value) {
                     parent = parent.right orelse {
-                        parent.right = child;
+                        parent.right = new;
                         parent.bf += 1;
                         break;
                     };
@@ -123,17 +125,16 @@ pub fn AvlTree(comptime Value: type) type {
                 }
             }
 
-            child.parent = parent;
-            if (rebalanceAfterInsert(parent, child, value)) |new_root| {
+            new.parent = parent;
+            if (rebalanceAfterInsert(parent, new)) |new_root| {
                 tree.root = new_root;
             }
         }
 
-        fn rebalanceAfterInsert(parent_node: *Node, inserted_node: *Node, value: Value) ?*Node {
-            if (parent_node.bf == 0) {
-                return null;
-            }
+        fn rebalanceAfterInsert(parent_node: *Node, inserted_node: *Node) ?*Node {
+            if (parent_node.bf == 0) return null;
 
+            const value = inserted_node.value;
             var parent = parent_node;
             var child = inserted_node;
             while (parent.parent) |grandparent| {
@@ -408,6 +409,81 @@ pub fn AvlTree(comptime Value: type) type {
             }
         }
 
+        fn join(left: *Self, value: Value, right: *Self) !Self {
+            assert(std.meta.eql(left.allocator, right.allocator));
+            const allocator = left.allocator;
+            const new = try allocator.create(Node);
+            const left_height = left.height();
+            const right_height = right.height();
+
+            const root = root: {
+                switch (std.math.order(left_height, right_height)) {
+                    .gt => if (left_height > right_height + 1) {
+                        break :root joinRight(left.*, value, right.*, new, left_height, right_height) orelse left.root.?;
+                    } else {
+                        new.bf = -1;
+                    },
+                    .lt => if (right_height > left_height + 1) {
+                        panic("TODO\n", .{});
+                    } else {
+                        new.bf = 1;
+                    },
+                    .eq => new.bf = 0,
+                }
+
+                if (left.root) |r| r.parent = new;
+                if (right.root) |r| r.parent = new;
+                new.left = left.root;
+                new.right = right.root;
+                new.parent = null;
+                new.value = value;
+                break :root new;
+            };
+
+            left.* = undefined;
+            right.* = undefined;
+            return Self{ .root = root, .allocator = allocator };
+        }
+
+        fn joinRight(left: Self, value: Value, right: Self, new: *Node, left_height: usize, right_height: usize) ?*Node {
+            var node = left.root.?;
+            var current_height = left_height;
+            while (current_height > right_height + 1) {
+                switch (node.bf) {
+                    -2 => unreachable,
+                    -1 => {
+                        node = node.right orelse {
+                            assert(current_height == 2);
+                            assert(right_height == 0);
+                            new.* = Node{ .left = null, .right = null, .parent = node, .bf = 0, .value = value };
+                            node.right = new;
+                            node.bf = 0;
+                            return null;
+                        };
+                        current_height -= 2;
+                    },
+                    0, 1 => {
+                        node = node.right.?;
+                        current_height -= 1;
+                    },
+                }
+            }
+
+            const parent = node.parent.?;
+            new.* = Node{
+                .left = node,
+                .right = right.root,
+                .parent = parent,
+                .bf = @intCast(i2, @bitCast(isize, right_height -% current_height)),
+                .value = value,
+            };
+            if (right.root) |r| r.parent = new;
+            node.parent = new;
+            parent.right = new;
+            parent.bf += 1; // TODO: parent.bf could've been 1
+            return rebalanceAfterInsert(parent, new);
+        }
+
         const testing = struct {
             fn print(tree: Self, writer: anytype, comptime fmt: []const u8) !void {
                 var stack = ArrayList(*const Node).init(tree.allocator);
@@ -661,5 +737,62 @@ test "500 random values" {
             try failure.print(writer, "", tree);
             return error.InvalidTree;
         }
+    }
+}
+
+test "join" {
+    const allocator = std.testing.allocator;
+    const writer = std.io.getStdErr().writer();
+
+    const Value = u8;
+    const Tree = AvlTree(Value);
+    var left = Tree.init(allocator);
+    var right = Tree.init(allocator);
+
+    {
+        errdefer left.deinit();
+        for ("abcdefghijk") |c| try left.insert(c);
+    }
+    {
+        errdefer right.deinit();
+        for ("wxyz") |c| try right.insert(c);
+    }
+
+    var joined = Tree.join(&left, 'm', &right) catch |err| {
+        left.deinit();
+        right.deinit();
+        return err;
+    };
+    defer joined.deinit();
+
+    if (try Tree.testing.verifyTree(joined)) |failure| {
+        try writer.print("Failed to join trees\n", .{});
+        try failure.print(writer, "c", joined);
+        return error.InvalidTree;
+    } else {
+        try Tree.testing.showTree(joined, writer, "c");
+        try writer.writeAll("\n");
+        try Tree.testing.print(joined, writer, "c");
+        try writer.writeAll("\n");
+    }
+
+    {
+        left = Tree.init(allocator);
+        defer left.deinit();
+
+        for ("abcdefgh") |c| {
+            right = Tree.init(allocator);
+            left = try Tree.join(&left, c, &right);
+            if (try Tree.testing.verifyTree(left)) |failure| {
+                try writer.print("Failed to join trees: {c}\n", .{c});
+                try failure.print(writer, "c", left);
+                return error.InvalidTree;
+            }
+        }
+
+        try Tree.testing.showTree(left, writer, "c");
+        try writer.writeAll("\n");
+        try Tree.testing.print(left, writer, "c");
+        try writer.writeAll("\n");
     }
 }
