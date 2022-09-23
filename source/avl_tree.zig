@@ -422,12 +422,12 @@ pub fn AvlTree(comptime Value: type) type {
             const root = root: {
                 switch (std.math.order(left_height, right_height)) {
                     .gt => if (left_height > right_height + 1) {
-                        break :root joinRight(left.*, value, right.*, new, left_height, right_height) orelse left.root.?;
+                        break :root joinGeneric(.left, left.*, value, right.*, new, left_height, right_height);
                     } else {
                         new.bf = -1;
                     },
                     .lt => if (right_height > left_height + 1) {
-                        break :root joinLeft(left.*, value, right.*, new, left_height, right_height) orelse right.root.?;
+                        break :root joinGeneric(.right, left.*, value, right.*, new, left_height, right_height);
                     } else {
                         new.bf = 1;
                     },
@@ -451,25 +451,43 @@ pub fn AvlTree(comptime Value: type) type {
             return result;
         }
 
-        fn joinRight(left: Self, value: Value, right: Self, new: *Node, left_height: usize, right_height: usize) ?*Node {
-            var node = left.root.?;
-            var current_height = left_height;
-            while (current_height > right_height + 1) {
+        // TODO: stage1 won't compile without this
+        const Taller = enum { left, right };
+
+        fn joinGeneric(
+            comptime taller: Taller,
+            left: Self,
+            value: Value,
+            right: Self,
+            new: *Node,
+            left_height: usize,
+            right_height: usize,
+        ) *Node {
+            const taller_tree = if (taller == .left) left else right;
+            const taller_height = if (taller == .left) left_height else right_height;
+            const shorter_tree = if (taller == .left) right else left;
+            const shorter_height = if (taller == .left) right_height else left_height;
+            const direction_int = if (taller == .left) -1 else 1;
+            const travel_direction = if (taller == .left) "right" else "left";
+
+            var node = taller_tree.root.?;
+            var current_height = taller_height;
+            while (current_height > shorter_height + 1) {
                 switch (node.bf) {
                     -2 => unreachable,
-                    -1 => {
-                        node = node.right orelse {
+                    direction_int => {
+                        node = @field(node, travel_direction) orelse {
                             assert(current_height == 2);
-                            assert(right_height == 0);
+                            assert(shorter_height == 0);
                             new.* = Node{ .left = null, .right = null, .parent = node, .bf = 0, .value = value };
-                            node.right = new;
+                            @field(node, travel_direction) = new;
                             node.bf = 0;
-                            return null;
+                            return taller_tree.root.?;
                         };
                         current_height -= 2;
                     },
-                    0, 1 => {
-                        node = node.right.?;
+                    0, -direction_int => {
+                        node = @field(node, travel_direction).?;
                         current_height -= 1;
                     },
                 }
@@ -477,54 +495,16 @@ pub fn AvlTree(comptime Value: type) type {
 
             const parent = node.parent.?;
             new.* = Node{
-                .left = node,
-                .right = right.root,
+                .left = if (taller == .left) node else left.root,
+                .right = if (taller == .left) right.root else node,
                 .parent = parent,
-                .bf = @intCast(i2, @bitCast(isize, right_height -% current_height)),
+                .bf = @intCast(i2, @bitCast(isize, if (taller == .left) right_height -% current_height else current_height -% left_height)),
                 .value = value,
             };
-            if (right.root) |r| r.parent = new;
+            if (shorter_tree.root) |r| r.parent = new;
             node.parent = new;
-            parent.right = new;
-            return rebalanceAfterInsert(parent, value);
-        }
-
-        fn joinLeft(left: Self, value: Value, right: Self, new: *Node, left_height: usize, right_height: usize) ?*Node {
-            var node = right.root.?;
-            var current_height = right_height;
-            while (current_height > left_height + 1) {
-                switch (node.bf) {
-                    -2 => unreachable,
-                    -1, 0 => {
-                        node = node.left.?;
-                        current_height -= 1;
-                    },
-                    1 => {
-                        node = node.left orelse {
-                            assert(current_height == 2);
-                            assert(left_height == 0);
-                            new.* = Node{ .left = null, .right = null, .parent = node, .bf = 0, .value = value };
-                            node.left = new;
-                            node.bf = 0;
-                            return null;
-                        };
-                        current_height -= 2;
-                    },
-                }
-            }
-
-            const parent = node.parent.?;
-            new.* = Node{
-                .left = left.root,
-                .right = node,
-                .parent = parent,
-                .bf = @intCast(i2, @bitCast(isize, current_height -% left_height)),
-                .value = value,
-            };
-            if (left.root) |r| r.parent = new;
-            node.parent = new;
-            parent.left = new;
-            return rebalanceAfterInsert(parent, value);
+            @field(parent, travel_direction) = new;
+            return rebalanceAfterInsert(parent, value) orelse taller_tree.root.?;
         }
 
         const format = testing.showTree;
@@ -534,26 +514,25 @@ pub fn AvlTree(comptime Value: type) type {
             const check_fmt = "";
 
             fn print(tree: Self, writer: anytype, comptime fmt: []const u8) !void {
-                var stack = ArrayList(*const Node).init(tree.allocator);
-                defer stack.deinit();
-
-                var node_opt: ?*const Node = tree.root orelse return;
-                {
-                    while (node_opt.?.left) |left| {
-                        try stack.append(node_opt.?);
-                        node_opt = left;
-                    }
+                var node = tree.root orelse return;
+                while (node.left) |left| {
+                    node = left;
                 }
-                while (node_opt) |node| {
+
+                while (true) {
                     try writer.print("{" ++ fmt ++ "}", .{node.value});
                     if (node.right) |right| {
-                        node_opt = right;
-                        while (node_opt.?.left) |left| {
-                            try stack.append(node_opt.?);
-                            node_opt = left;
+                        node = right;
+                        while (node.left) |left| {
+                            node = left;
                         }
                     } else {
-                        node_opt = stack.popOrNull();
+                        while (true) {
+                            const parent = node.parent orelse return;
+                            const is_left = node == parent.left;
+                            node = parent;
+                            if (is_left) break;
+                        }
                     }
                 }
             }
