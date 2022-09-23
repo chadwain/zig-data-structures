@@ -13,8 +13,7 @@ fn AvlTreeNode(comptime Value: type) type {
         value: Value,
         bf: i2,
 
-        pub fn format(node: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-            _ = options;
+        pub fn format(node: Self, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
             try writer.print(
                 "value={" ++ fmt ++ "}, bf={}, parent={?" ++ fmt ++ "}, left={?" ++ fmt ++ "}, right={?" ++ fmt ++ "}",
                 .{
@@ -99,7 +98,7 @@ pub fn AvlTree(comptime Value: type) type {
         }
 
         fn insert(tree: *Self, value: Value) !void {
-            var new = try tree.allocator.create(Node);
+            const new = try tree.allocator.create(Node);
             new.* = Node{ .left = null, .right = null, .parent = undefined, .value = value, .bf = 0 };
 
             var parent = tree.root orelse {
@@ -111,13 +110,11 @@ pub fn AvlTree(comptime Value: type) type {
                 if (value < parent.value) {
                     parent = parent.left orelse {
                         parent.left = new;
-                        parent.bf -= 1;
                         break;
                     };
                 } else if (value > parent.value) {
                     parent = parent.right orelse {
                         parent.right = new;
-                        parent.bf += 1;
                         break;
                     };
                 } else {
@@ -126,111 +123,116 @@ pub fn AvlTree(comptime Value: type) type {
             }
 
             new.parent = parent;
-            if (rebalanceAfterInsert(parent, new)) |new_root| {
+            if (rebalanceAfterInsert(parent, value)) |new_root| {
                 tree.root = new_root;
             }
+            testing.doCheck(tree.*, "insert", value);
         }
 
-        fn rebalanceAfterInsert(parent_node: *Node, inserted_node: *Node) ?*Node {
-            if (parent_node.bf == 0) return null;
-
-            const value = inserted_node.value;
+        fn rebalanceAfterInsert(parent_node: *Node, value: Value) ?*Node {
             var parent = parent_node;
-            var child = inserted_node;
-            while (parent.parent) |grandparent| {
-                const direction_int: i2 = if (value < grandparent.value) -1 else 1;
+            while (true) {
+                const direction_int: i2 = if (value < parent.value) -1 else 1;
 
-                if (grandparent.bf == -2) {
+                if (parent.bf == -2) {
                     unreachable;
-                } else if (grandparent.bf == 0) {
-                    grandparent.bf = direction_int;
-                } else if (grandparent.bf == -direction_int) {
-                    grandparent.bf = 0;
+                } else if (parent.bf == 0) {
+                    parent.bf = direction_int;
+                    parent = parent.parent orelse return null;
+                } else if (parent.bf == -direction_int) {
+                    parent.bf = 0;
                     return null;
-                } else if (grandparent.bf == direction_int) {
-                    var grandparent_edge: Edge = undefined;
+                } else if (parent.bf == direction_int) {
                     var parent_edge: Edge = undefined;
-                    var child_first_edge: Edge = undefined;
-                    var child_second_edge: Edge = undefined;
-                    if (value < grandparent.value) {
-                        grandparent_edge = &grandparent.left;
-                        parent_edge = &parent.right;
-                        child_first_edge = &child.left;
-                        child_second_edge = &child.right;
-                    } else {
-                        grandparent_edge = &grandparent.right;
+                    var child: *Node = undefined;
+                    var child_edge: Edge = undefined;
+                    // var child_first_edge: Edge = undefined;
+                    // var child_second_edge: Edge = undefined;
+                    if (direction_int == -1) {
                         parent_edge = &parent.left;
-                        child_first_edge = &child.right;
-                        child_second_edge = &child.left;
+                        child = parent.left.?;
+                        child_edge = &child.right;
+                        // child_first_edge = &child.left;
+                        // child_second_edge = &child.right;
+                    } else {
+                        parent_edge = &parent.right;
+                        child = parent.right.?;
+                        child_edge = &child.left;
+                        // child_first_edge = &child.right;
+                        // child_second_edge = &child.left;
                     }
 
                     var new_subtree_root: *Node = undefined;
-                    if (parent.bf == direction_int) {
+                    if (child.bf == direction_int) {
                         // direction_int == -1: clockwise rotation
                         // direction_int == +1: counter-clockwise rotation
-                        grandparent_edge.* = parent_edge.*;
-                        if (parent_edge.*) |n| n.parent = grandparent;
-                        parent_edge.* = grandparent;
-                        parent.parent = grandparent.parent;
-                        grandparent.parent = parent;
-
-                        grandparent.bf = 0;
-                        parent.bf = 0;
-
-                        new_subtree_root = parent;
-                    } else if (parent.bf == -direction_int) {
-                        // direction_int == -1: counter-clockwise rotation
-                        // direction_int == +1: clockwise rotation
-                        parent_edge.* = child_first_edge.*;
-                        if (child_first_edge.*) |n| n.parent = parent;
-                        child_first_edge.* = parent;
+                        parent_edge.* = child_edge.*;
+                        if (child_edge.*) |n| n.parent = parent;
+                        child_edge.* = parent;
+                        child.parent = parent.parent;
                         parent.parent = child;
 
-                        // direction_int == -1: clockwise rotation
-                        // direction_int == +1: counter-clockwise rotation
-                        grandparent_edge.* = child_second_edge.*;
-                        if (child_second_edge.*) |n| n.parent = grandparent;
-                        child_second_edge.* = grandparent;
-                        child.parent = grandparent.parent;
-                        grandparent.parent = child;
-
-                        if (child.bf == direction_int) {
-                            grandparent.bf = -direction_int;
-                            parent.bf = 0;
-                        } else if (child.bf == -direction_int) {
-                            grandparent.bf = 0;
-                            parent.bf = direction_int;
-                        } else if (child.bf == 0) {
-                            // Only reachable on the first iteration of this loop.
-                            grandparent.bf = 0;
-                            parent.bf = 0;
-                        } else if (child.bf == -2) {
-                            unreachable;
-                        }
+                        parent.bf = 0;
                         child.bf = 0;
 
                         new_subtree_root = child;
+                    } else if (child.bf == -direction_int) {
+                        const grandchild = child_edge.*.?;
+                        var grandchild_first_edge: Edge = undefined;
+                        var grandchild_second_edge: Edge = undefined;
+                        if (direction_int == -1) {
+                            grandchild_first_edge = &grandchild.left;
+                            grandchild_second_edge = &grandchild.right;
+                        } else {
+                            grandchild_first_edge = &grandchild.right;
+                            grandchild_second_edge = &grandchild.left;
+                        }
+
+                        // direction_int == -1: clockwise rotation
+                        // direction_int == +1: counter-clockwise rotation
+                        child_edge.* = grandchild_first_edge.*;
+                        if (grandchild_first_edge.*) |n| n.parent = child;
+                        grandchild_first_edge.* = child;
+                        child.parent = grandchild;
+
+                        // direction_int == -1: counter-clockwise rotation
+                        // direction_int == +1: clockwise rotation
+                        parent_edge.* = grandchild_second_edge.*;
+                        if (grandchild_second_edge.*) |n| n.parent = parent;
+                        grandchild_second_edge.* = parent;
+                        grandchild.parent = parent.parent;
+                        parent.parent = grandchild;
+
+                        if (grandchild.bf == direction_int) {
+                            parent.bf = -direction_int;
+                            child.bf = 0;
+                        } else if (grandchild.bf == -direction_int) {
+                            parent.bf = 0;
+                            child.bf = direction_int;
+                        } else if (grandchild.bf == 0) {
+                            // Only reachable on the second iteration of this loop.
+                            assert(child == parent_node);
+                            parent.bf = 0;
+                            child.bf = 0;
+                        } else if (grandchild.bf == -2) {
+                            unreachable;
+                        }
+                        grandchild.bf = 0;
+
+                        new_subtree_root = grandchild;
                     } else {
                         unreachable;
                     }
 
-                    if (new_subtree_root.parent) |new_parent| {
-                        if (value < new_parent.value) {
-                            new_parent.left = new_subtree_root;
-                        } else {
-                            new_parent.right = new_subtree_root;
-                        }
-                        return null;
+                    parent = new_subtree_root.parent orelse return new_subtree_root;
+                    if (value < parent.value) {
+                        parent.left = new_subtree_root;
                     } else {
-                        return new_subtree_root;
+                        parent.right = new_subtree_root;
                     }
+                    return null;
                 }
-
-                child = parent;
-                parent = grandparent;
             }
-
-            return null;
         }
 
         fn delete(tree: *Self, value: Value) void {
@@ -407,6 +409,7 @@ pub fn AvlTree(comptime Value: type) type {
                     break :direction_int if (value < node.value) @as(i2, -1) else 1;
                 };
             }
+            testing.doCheck(tree.*, "delete", value);
         }
 
         fn join(left: *Self, value: Value, right: *Self) !Self {
@@ -424,7 +427,7 @@ pub fn AvlTree(comptime Value: type) type {
                         new.bf = -1;
                     },
                     .lt => if (right_height > left_height + 1) {
-                        panic("TODO\n", .{});
+                        break :root joinLeft(left.*, value, right.*, new, left_height, right_height) orelse right.root.?;
                     } else {
                         new.bf = 1;
                     },
@@ -442,7 +445,10 @@ pub fn AvlTree(comptime Value: type) type {
 
             left.* = undefined;
             right.* = undefined;
-            return Self{ .root = root, .allocator = allocator };
+
+            const result = Self{ .root = root, .allocator = allocator };
+            testing.doCheck(result, "join", value);
+            return result;
         }
 
         fn joinRight(left: Self, value: Value, right: Self, new: *Node, left_height: usize, right_height: usize) ?*Node {
@@ -480,11 +486,53 @@ pub fn AvlTree(comptime Value: type) type {
             if (right.root) |r| r.parent = new;
             node.parent = new;
             parent.right = new;
-            parent.bf += 1; // TODO: parent.bf could've been 1
-            return rebalanceAfterInsert(parent, new);
+            return rebalanceAfterInsert(parent, value);
         }
 
+        fn joinLeft(left: Self, value: Value, right: Self, new: *Node, left_height: usize, right_height: usize) ?*Node {
+            var node = right.root.?;
+            var current_height = right_height;
+            while (current_height > left_height + 1) {
+                switch (node.bf) {
+                    -2 => unreachable,
+                    -1, 0 => {
+                        node = node.left.?;
+                        current_height -= 1;
+                    },
+                    1 => {
+                        node = node.left orelse {
+                            assert(current_height == 2);
+                            assert(left_height == 0);
+                            new.* = Node{ .left = null, .right = null, .parent = node, .bf = 0, .value = value };
+                            node.left = new;
+                            node.bf = 0;
+                            return null;
+                        };
+                        current_height -= 2;
+                    },
+                }
+            }
+
+            const parent = node.parent.?;
+            new.* = Node{
+                .left = left.root,
+                .right = node,
+                .parent = parent,
+                .bf = @intCast(i2, @bitCast(isize, current_height -% left_height)),
+                .value = value,
+            };
+            if (left.root) |r| r.parent = new;
+            node.parent = new;
+            parent.left = new;
+            return rebalanceAfterInsert(parent, value);
+        }
+
+        const format = testing.showTree;
+
         const testing = struct {
+            const pedantic_checking = true;
+            const check_fmt = "";
+
             fn print(tree: Self, writer: anytype, comptime fmt: []const u8) !void {
                 var stack = ArrayList(*const Node).init(tree.allocator);
                 defer stack.deinit();
@@ -510,7 +558,7 @@ pub fn AvlTree(comptime Value: type) type {
                 }
             }
 
-            fn showTree(tree: Self, writer: anytype, comptime fmt: []const u8) !void {
+            fn showTree(tree: Self, comptime fmt: []const u8) !void {
                 var stack = ArrayList(struct { node: *const Node, indent: usize, which: enum { root, left, right } }).init(tree.allocator);
                 defer stack.deinit();
 
@@ -520,11 +568,8 @@ pub fn AvlTree(comptime Value: type) type {
                 while (stack.items.len > 0) {
                     const item = stack.pop();
                     const node = item.node;
-                    try writer.writeByteNTimes(' ', item.indent * 4);
-                    try writer.print(
-                        "({s} node) value={" ++ fmt ++ "}, bf={}, parent={?" ++ fmt ++ "}\n",
-                        .{ @tagName(item.which), node.value, node.bf, if (node.parent) |p| @as(?Value, p.value) else null },
-                    );
+                    for (@as([*]u0, undefined)[0 .. item.indent * 4]) |_| std.debug.print(" ", .{});
+                    std.debug.print("({s} node) {" ++ fmt ++ "}\n", .{ @tagName(item.which), node });
 
                     if (node.right) |right| try stack.append(.{ .node = right, .indent = item.indent + 1, .which = .right });
                     if (node.left) |left| try stack.append(.{ .node = left, .indent = item.indent + 1, .which = .left });
@@ -543,12 +588,23 @@ pub fn AvlTree(comptime Value: type) type {
                     DuplicateValue,
                     Cycle,
                 },
-
-                fn print(failure: VerifyTreeFailure, writer: anytype, comptime fmt: []const u8, tree: Self) !void {
-                    try writer.print("Invalid tree detected! Reason: {s}\n{" ++ fmt ++ "}\n", .{ @tagName(failure.reason), failure.node });
-                    try showTree(tree, writer, fmt);
-                }
             };
+
+            fn doCheck(tree: Self, comptime operation: []const u8, context: anytype) void {
+                if (comptime pedantic_checking) {
+                    _ = @as(Allocator.Error!void, blk: {
+                        if (verifyTree(tree) catch |err| break :blk err) |failure| {
+                            std.debug.print(
+                                "Invalid tree detected: {s}\nOperation: " ++ operation ++ "\nContext: {}\nWhile checking this node:\n{" ++ check_fmt ++ "}\n\n",
+                                .{ @tagName(failure.reason), context, failure.node },
+                            );
+                            showTree(tree, check_fmt) catch |err| break :blk err;
+                            std.debug.print("\n", .{});
+                            unreachable;
+                        }
+                    }) catch |err| panic("Error while verifying tree integrity: {s}\n", .{@errorName(err)});
+                }
+            }
 
             fn verifyTree(tree: Self) !?VerifyTreeFailure {
                 var stack = ArrayList(struct {
@@ -667,7 +723,6 @@ test "AvlTree basic usage" {
 
 test "small string" {
     const allocator = std.testing.allocator;
-    const writer = std.io.getStdErr().writer();
 
     const Tree = AvlTree(u8);
     var tree = Tree.init(allocator);
@@ -675,20 +730,10 @@ test "small string" {
 
     for ("acbdmzGAXlkw987654") |c| {
         try tree.insert(c);
-        if (try Tree.testing.verifyTree(tree)) |failure| {
-            try writer.print("Failed to insert value: {c}\n", .{c});
-            try failure.print(writer, "c", tree);
-            return error.InvalidTree;
-        }
     }
 
     for ("acbdmzGAXlkw987654") |c| {
         tree.delete(c);
-        if (try Tree.testing.verifyTree(tree)) |failure| {
-            try writer.print("Failed to delete value: {c}\n", .{c});
-            try failure.print(writer, "c", tree);
-            return error.InvalidTree;
-        }
     }
 }
 
@@ -698,7 +743,6 @@ test "500 random values" {
     // Check the tree after every insertion/deletion.
 
     const allocator = std.testing.allocator;
-    const writer = std.io.getStdErr().writer();
 
     var rng = std.rand.DefaultPrng.init(0);
     const random = rng.random();
@@ -717,11 +761,6 @@ test "500 random values" {
             list[list_len] = value;
             list_len += 1;
             try tree.insert(value);
-            if (try Tree.testing.verifyTree(tree)) |failure| {
-                try writer.print("Failed to delete value: {}\n", .{value});
-                try failure.print(writer, "", tree);
-                return error.InvalidTree;
-            }
         }
     }
 
@@ -732,11 +771,6 @@ test "500 random values" {
         assert(tree.find(value) != null);
         std.mem.swap(Value, &list[int], &list[i - 1]);
         tree.delete(value);
-        if (try Tree.testing.verifyTree(tree)) |failure| {
-            try writer.print("Failed to delete value: {}\n", .{value});
-            try failure.print(writer, "", tree);
-            return error.InvalidTree;
-        }
     }
 }
 
@@ -750,49 +784,70 @@ test "join" {
     var right = Tree.init(allocator);
 
     {
-        errdefer left.deinit();
-        for ("abcdefghijk") |c| try left.insert(c);
-    }
-    {
-        errdefer right.deinit();
-        for ("wxyz") |c| try right.insert(c);
-    }
+        {
+            errdefer left.deinit();
+            for ("abcdefghijk") |c| try left.insert(c);
+        }
+        {
+            errdefer right.deinit();
+            for ("wxyz") |c| try right.insert(c);
+        }
 
-    var joined = Tree.join(&left, 'm', &right) catch |err| {
-        left.deinit();
-        right.deinit();
-        return err;
-    };
-    defer joined.deinit();
+        var joined = Tree.join(&left, 'm', &right) catch |err| {
+            left.deinit();
+            right.deinit();
+            return err;
+        };
+        defer joined.deinit();
 
-    if (try Tree.testing.verifyTree(joined)) |failure| {
-        try writer.print("Failed to join trees\n", .{});
-        try failure.print(writer, "c", joined);
-        return error.InvalidTree;
-    } else {
-        try Tree.testing.showTree(joined, writer, "c");
-        try writer.writeAll("\n");
-        try Tree.testing.print(joined, writer, "c");
-        try writer.writeAll("\n");
+        {
+            left = Tree.init(allocator);
+            defer left.deinit();
+
+            for ("abcdefgh") |c| {
+                right = Tree.init(allocator);
+                left = try Tree.join(&left, c, &right);
+            }
+
+            try Tree.testing.showTree(left, "c");
+            try writer.writeAll("\n");
+            try Tree.testing.print(left, writer, "c");
+            try writer.writeAll("\n");
+        }
     }
 
     {
         left = Tree.init(allocator);
-        defer left.deinit();
-
-        for ("abcdefgh") |c| {
-            right = Tree.init(allocator);
-            left = try Tree.join(&left, c, &right);
-            if (try Tree.testing.verifyTree(left)) |failure| {
-                try writer.print("Failed to join trees: {c}\n", .{c});
-                try failure.print(writer, "c", left);
-                return error.InvalidTree;
-            }
+        right = Tree.init(allocator);
+        {
+            errdefer left.deinit();
+            for ("abcd") |c| try left.insert(c);
+        }
+        {
+            errdefer right.deinit();
+            for ("pqrstuvwxyz") |c| try right.insert(c);
         }
 
-        try Tree.testing.showTree(left, writer, "c");
-        try writer.writeAll("\n");
-        try Tree.testing.print(left, writer, "c");
-        try writer.writeAll("\n");
+        var joined = Tree.join(&left, 'm', &right) catch |err| {
+            left.deinit();
+            right.deinit();
+            return err;
+        };
+        defer joined.deinit();
+
+        {
+            right = Tree.init(allocator);
+            defer right.deinit();
+
+            for ("zyxwvuts") |c| {
+                left = Tree.init(allocator);
+                right = try Tree.join(&left, c, &right);
+            }
+
+            try Tree.testing.showTree(right, "c");
+            try writer.writeAll("\n");
+            try Tree.testing.print(right, writer, "c");
+            try writer.writeAll("\n");
+        }
     }
 }
