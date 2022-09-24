@@ -146,20 +146,14 @@ pub fn AvlTree(comptime Value: type) type {
                     var parent_edge: Edge = undefined;
                     var child: *Node = undefined;
                     var child_edge: Edge = undefined;
-                    // var child_first_edge: Edge = undefined;
-                    // var child_second_edge: Edge = undefined;
                     if (direction_int == -1) {
                         parent_edge = &parent.left;
                         child = parent.left.?;
                         child_edge = &child.right;
-                        // child_first_edge = &child.left;
-                        // child_second_edge = &child.right;
                     } else {
                         parent_edge = &parent.right;
                         child = parent.right.?;
                         child_edge = &child.left;
-                        // child_first_edge = &child.right;
-                        // child_second_edge = &child.left;
                     }
 
                     var new_subtree_root: *Node = undefined;
@@ -188,15 +182,15 @@ pub fn AvlTree(comptime Value: type) type {
                             grandchild_second_edge = &grandchild.left;
                         }
 
-                        // direction_int == -1: clockwise rotation
-                        // direction_int == +1: counter-clockwise rotation
+                        // direction_int == -1: counter-clockwise rotation
+                        // direction_int == +1: clockwise rotation
                         child_edge.* = grandchild_first_edge.*;
                         if (grandchild_first_edge.*) |n| n.parent = child;
                         grandchild_first_edge.* = child;
                         child.parent = grandchild;
 
-                        // direction_int == -1: counter-clockwise rotation
-                        // direction_int == +1: clockwise rotation
+                        // direction_int == -1: clockwise rotation
+                        // direction_int == +1: counter-clockwise rotation
                         parent_edge.* = grandchild_second_edge.*;
                         if (grandchild_second_edge.*) |n| n.parent = parent;
                         grandchild_second_edge.* = parent;
@@ -585,23 +579,23 @@ pub fn AvlTree(comptime Value: type) type {
                 }
             }
 
+            /// Check that the tree satisfies the properties of a binary tree, binary search tree, and AVL Tree.
             fn verifyTree(tree: Self) !?VerifyTreeFailure {
                 var stack = ArrayList(struct {
                     node: *const Node,
-                    height_left: usize,
-                    height_right: usize,
+                    left_height: usize,
+                    right_height: usize,
                     direction: enum { down, left, right },
                 }).init(tree.allocator);
                 defer stack.deinit();
 
-                var visitied_nodes = std.AutoHashMap(*const Node, void).init(tree.allocator);
-                defer visitied_nodes.deinit();
+                var visited_nodes = std.AutoHashMap(*const Node, void).init(tree.allocator);
+                defer visited_nodes.deinit();
 
                 {
                     const root = tree.root orelse return null;
                     if (root.parent) |_| return VerifyTreeFailure{ .node = root, .reason = .RootHasParent };
-                    try stack.append(.{ .node = root, .height_left = undefined, .height_right = undefined, .direction = .down });
-                    try visitied_nodes.put(root, {});
+                    try stack.append(.{ .node = root, .left_height = undefined, .right_height = undefined, .direction = .down });
                 }
 
                 while (stack.items.len > 0) {
@@ -611,12 +605,12 @@ pub fn AvlTree(comptime Value: type) type {
                             return VerifyTreeFailure{ .node = this.node, .reason = .WrongBalanceFactor };
                         }
 
+                        if (try visited_nodes.fetchPut(this.node, {})) |_| {
+                            return VerifyTreeFailure{ .node = this.node, .reason = .Cycle };
+                        }
+
                         if (stack.items.len > 1) {
                             const parent = stack.items[stack.items.len - 2];
-
-                            if (try visitied_nodes.fetchPut(this.node, {})) |_| {
-                                return VerifyTreeFailure{ .node = parent.node, .reason = .Cycle };
-                            }
 
                             if (this.node.parent) |node_parent| {
                                 if (node_parent != parent.node) return VerifyTreeFailure{ .node = this.node, .reason = .WrongParent };
@@ -637,43 +631,43 @@ pub fn AvlTree(comptime Value: type) type {
 
                         this.direction = .left;
                         if (this.node.left) |left| {
-                            try stack.append(.{ .node = left, .height_left = undefined, .height_right = undefined, .direction = .down });
+                            try stack.append(.{ .node = left, .left_height = undefined, .right_height = undefined, .direction = .down });
                             continue;
                         } else {
-                            this.height_left = 0;
+                            this.left_height = 0;
                         }
                     }
 
                     if (this.direction == .left) {
                         this.direction = .right;
                         if (this.node.right) |right| {
-                            try stack.append(.{ .node = right, .height_left = undefined, .height_right = undefined, .direction = .down });
+                            try stack.append(.{ .node = right, .left_height = undefined, .right_height = undefined, .direction = .down });
                             continue;
                         } else {
-                            this.height_right = 0;
+                            this.right_height = 0;
                         }
                     }
 
-                    if (std.math.max(this.height_left, this.height_right) - std.math.min(this.height_left, this.height_right) > 1) {
+                    if (std.math.max(this.left_height, this.right_height) - std.math.min(this.left_height, this.right_height) > 1) {
                         return VerifyTreeFailure{ .node = this.node, .reason = .HeightDifferenceTooLarge };
                     }
 
                     if (!switch (this.node.bf) {
                         -2 => unreachable,
-                        -1 => this.height_left > this.height_right,
-                        0 => this.height_left == this.height_right,
-                        1 => this.height_left < this.height_right,
+                        -1 => this.left_height > this.right_height,
+                        0 => this.left_height == this.right_height,
+                        1 => this.left_height < this.right_height,
                     }) {
                         return VerifyTreeFailure{ .node = this.node, .reason = .WrongBalanceFactor };
                     }
 
                     _ = stack.pop();
                     if (stack.items.len > 0) {
-                        const this_height = std.math.max(this.height_left, this.height_right);
+                        const this_height = std.math.max(this.left_height, this.right_height);
                         const parent = &stack.items[stack.items.len - 1];
                         switch (parent.direction) {
-                            .left => parent.height_left = this_height + 1,
-                            .right => parent.height_right = this_height + 1,
+                            .left => parent.left_height = this_height + 1,
+                            .right => parent.right_height = this_height + 1,
                             else => unreachable,
                         }
                     }
