@@ -31,6 +31,7 @@ fn AvlTreeNode(comptime Value: type) type {
 pub fn AvlTree(comptime Value: type) type {
     return struct {
         root: ?*Node = null,
+        height: usize = 0,
         allocator: Allocator,
 
         const Self = @This();
@@ -104,6 +105,7 @@ pub fn AvlTree(comptime Value: type) type {
             var parent = tree.root orelse {
                 new.parent = null;
                 tree.root = new;
+                tree.height = 1;
                 return;
             };
             while (true) {
@@ -123,13 +125,11 @@ pub fn AvlTree(comptime Value: type) type {
             }
 
             new.parent = parent;
-            if (rebalanceAfterInsert(parent, value)) |new_root| {
-                tree.root = new_root;
-            }
+            rebalanceAfterInsert(tree, parent, value);
             testing.doCheck(tree.*, "insert", value);
         }
 
-        fn rebalanceAfterInsert(parent_node: *Node, value: Value) ?*Node {
+        fn rebalanceAfterInsert(tree: *Self, parent_node: *Node, value: Value) void {
             var parent = parent_node;
             while (true) {
                 const direction_int: i2 = if (value < parent.value) -1 else 1;
@@ -138,10 +138,13 @@ pub fn AvlTree(comptime Value: type) type {
                     unreachable;
                 } else if (parent.bf == 0) {
                     parent.bf = direction_int;
-                    parent = parent.parent orelse return null;
+                    parent = parent.parent orelse {
+                        tree.height += 1;
+                        return;
+                    };
                 } else if (parent.bf == -direction_int) {
                     parent.bf = 0;
-                    return null;
+                    return;
                 } else if (parent.bf == direction_int) {
                     var parent_edge: Edge = undefined;
                     var child: *Node = undefined;
@@ -218,13 +221,16 @@ pub fn AvlTree(comptime Value: type) type {
                         unreachable;
                     }
 
-                    parent = new_subtree_root.parent orelse return new_subtree_root;
+                    parent = new_subtree_root.parent orelse {
+                        tree.root = new_subtree_root;
+                        return;
+                    };
                     if (value < parent.value) {
                         parent.left = new_subtree_root;
                     } else {
                         parent.right = new_subtree_root;
                     }
-                    return null;
+                    return;
                 }
             }
         }
@@ -287,6 +293,7 @@ pub fn AvlTree(comptime Value: type) type {
                 } else {
                     tree.root = replacement;
                     if (start_retracing_from == null) {
+                        tree.height = 0;
                         return;
                     }
                 }
@@ -316,6 +323,7 @@ pub fn AvlTree(comptime Value: type) type {
                     }
 
                     var new_subtree_root: *Node = undefined;
+                    var decrease_height: bool = undefined;
                     const stop = child.bf == 0;
                     if (child.bf == -2) {
                         unreachable;
@@ -330,6 +338,7 @@ pub fn AvlTree(comptime Value: type) type {
                         node.bf = -direction_int * @boolToInt(stop);
                         child.bf = -node.bf;
                         new_subtree_root = child;
+                        decrease_height = !stop;
                     } else if (child.bf == direction_int) {
                         const grandchild = child_edge.*.?;
                         var grandchild_first_edge: Edge = undefined;
@@ -371,10 +380,12 @@ pub fn AvlTree(comptime Value: type) type {
                         }
                         grandchild.bf = 0;
                         new_subtree_root = grandchild;
+                        decrease_height = true;
                     }
 
                     node = new_subtree_root.parent orelse {
                         tree.root = new_subtree_root;
+                        tree.height -= @boolToInt(decrease_height);
                         return;
                     };
                     direction_int = direction_int: {
@@ -395,7 +406,10 @@ pub fn AvlTree(comptime Value: type) type {
                     }
                 }
 
-                node = node.parent orelse return;
+                node = node.parent orelse {
+                    tree.height -= 1;
+                    return;
+                };
                 direction_int = direction_int: {
                     if (successor_value) |s| {
                         if (node.value == s) break :direction_int 1;
@@ -410,18 +424,18 @@ pub fn AvlTree(comptime Value: type) type {
             assert(std.meta.eql(left.allocator, right.allocator));
             const allocator = left.allocator;
             const new = try allocator.create(Node);
-            const left_height = left.height();
-            const right_height = right.height();
 
-            const root = root: {
-                switch (std.math.order(left_height, right_height)) {
-                    .gt => if (left_height > right_height + 1) {
-                        break :root joinGeneric(.left, left.*, value, right.*, new, left_height, right_height);
+            const result = result: {
+                switch (std.math.order(left.height, right.height)) {
+                    .gt => if (left.height > right.height + 1) {
+                        joinGeneric(.left, left, value, right, new);
+                        break :result left.*;
                     } else {
                         new.bf = -1;
                     },
-                    .lt => if (right_height > left_height + 1) {
-                        break :root joinGeneric(.right, left.*, value, right.*, new, left_height, right_height);
+                    .lt => if (right.height > left.height + 1) {
+                        joinGeneric(.right, left, value, right, new);
+                        break :result right.*;
                     } else {
                         new.bf = 1;
                     },
@@ -434,13 +448,12 @@ pub fn AvlTree(comptime Value: type) type {
                 new.right = right.root;
                 new.parent = null;
                 new.value = value;
-                break :root new;
+                break :result Self{ .root = new, .height = 1 + std.math.max(left.height, right.height), .allocator = left.allocator };
             };
 
             left.* = undefined;
             right.* = undefined;
 
-            const result = Self{ .root = root, .allocator = allocator };
             testing.doCheck(result, "join", value);
             return result;
         }
@@ -448,35 +461,25 @@ pub fn AvlTree(comptime Value: type) type {
         // TODO: stage1 won't compile without this
         const Taller = enum { left, right };
 
-        fn joinGeneric(
-            comptime taller: Taller,
-            left: Self,
-            value: Value,
-            right: Self,
-            new: *Node,
-            left_height: usize,
-            right_height: usize,
-        ) *Node {
+        fn joinGeneric(comptime taller: Taller, left: *Self, value: Value, right: *Self, new: *Node) void {
             const taller_tree = if (taller == .left) left else right;
-            const taller_height = if (taller == .left) left_height else right_height;
             const shorter_tree = if (taller == .left) right else left;
-            const shorter_height = if (taller == .left) right_height else left_height;
             const direction_int = if (taller == .left) -1 else 1;
             const travel_direction = if (taller == .left) "right" else "left";
 
             var node = taller_tree.root.?;
-            var current_height = taller_height;
-            while (current_height > shorter_height + 1) {
+            var current_height = taller_tree.height;
+            while (current_height > shorter_tree.height + 1) {
                 switch (node.bf) {
                     -2 => unreachable,
                     direction_int => {
                         node = @field(node, travel_direction) orelse {
                             assert(current_height == 2);
-                            assert(shorter_height == 0);
+                            assert(shorter_tree.height == 0);
                             new.* = Node{ .left = null, .right = null, .parent = node, .bf = 0, .value = value };
                             @field(node, travel_direction) = new;
                             node.bf = 0;
-                            return taller_tree.root.?;
+                            return;
                         };
                         current_height -= 2;
                     },
@@ -492,13 +495,13 @@ pub fn AvlTree(comptime Value: type) type {
                 .left = if (taller == .left) node else left.root,
                 .right = if (taller == .left) right.root else node,
                 .parent = parent,
-                .bf = @intCast(i2, @bitCast(isize, if (taller == .left) right_height -% current_height else current_height -% left_height)),
+                .bf = @intCast(i2, @bitCast(isize, if (taller == .left) right.height -% current_height else current_height -% left.height)),
                 .value = value,
             };
             if (shorter_tree.root) |r| r.parent = new;
             node.parent = new;
             @field(parent, travel_direction) = new;
-            return rebalanceAfterInsert(parent, value) orelse taller_tree.root.?;
+            rebalanceAfterInsert(taller_tree, parent, value);
         }
 
         const format = testing.showTree;
@@ -558,6 +561,7 @@ pub fn AvlTree(comptime Value: type) type {
                     WrongDirection,
                     WrongBalanceFactor,
                     HeightDifferenceTooLarge,
+                    HeightFieldIsWrong,
                     DuplicateValue,
                     Cycle,
                 },
@@ -592,11 +596,9 @@ pub fn AvlTree(comptime Value: type) type {
                 var visited_nodes = std.AutoHashMap(*const Node, void).init(tree.allocator);
                 defer visited_nodes.deinit();
 
-                {
-                    const root = tree.root orelse return null;
-                    if (root.parent) |_| return VerifyTreeFailure{ .node = root, .reason = .RootHasParent };
-                    try stack.append(.{ .node = root, .left_height = undefined, .right_height = undefined, .direction = .down });
-                }
+                const root = tree.root orelse return null;
+                if (root.parent) |_| return VerifyTreeFailure{ .node = root, .reason = .RootHasParent };
+                try stack.append(.{ .node = root, .left_height = undefined, .right_height = undefined, .direction = .down });
 
                 while (stack.items.len > 0) {
                     const this = &stack.items[stack.items.len - 1];
@@ -661,14 +663,18 @@ pub fn AvlTree(comptime Value: type) type {
                         return VerifyTreeFailure{ .node = this.node, .reason = .WrongBalanceFactor };
                     }
 
+                    const this_height = 1 + std.math.max(this.left_height, this.right_height);
                     _ = stack.pop();
                     if (stack.items.len > 0) {
-                        const this_height = std.math.max(this.left_height, this.right_height);
                         const parent = &stack.items[stack.items.len - 1];
                         switch (parent.direction) {
-                            .left => parent.left_height = this_height + 1,
-                            .right => parent.right_height = this_height + 1,
+                            .left => parent.left_height = this_height,
+                            .right => parent.right_height = this_height,
                             else => unreachable,
+                        }
+                    } else {
+                        if (this_height != tree.height) {
+                            return VerifyTreeFailure{ .node = root, .reason = .HeightFieldIsWrong };
                         }
                     }
                 }
